@@ -6,6 +6,8 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-08
+
 ### Added
 
 - **The AIR/MSL dialect is now detected from the installed Metal toolchain.** It used to be
