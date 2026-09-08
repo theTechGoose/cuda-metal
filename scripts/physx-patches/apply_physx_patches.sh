@@ -73,8 +73,10 @@ patch_marker_is_present() {
                     "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
             ;;
         0010-cumetal-grb-rolling-friction.patch)
-            # the kernel-side marker (the "host stages the selected target's prior patch" reuse) is removed again
-            # by 0022; the solver-core side of 0010 is the durable marker
+            # 0021 rewrites the hunk this marker was reading, so the kernel-side string
+            # ("host stages the selected target's prior patch") is gone on a tree that has
+            # it; the solver-core side of 0010 is the durable marker, and either kernel-side
+            # spelling counts. Without this the script tries to re-apply 0010 over 0021.
             { grep -q "prior frame's impulse is not integrated repeatedly" \
                 "${PHYSX_REPO}/physx/source/gpusolver/src/PxgCudaSolverCore.cpp" ||
                 grep -q 'prior-frame impulses are not integrated repeatedly' \
