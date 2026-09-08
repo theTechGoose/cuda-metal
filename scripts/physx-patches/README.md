@@ -134,6 +134,49 @@ adding the `CuMetalKernelInitStubs.cpp` file already referenced by patch 0005.
 These empty link anchors replace the init symbols normally emitted by nvcc;
 CuMetal loads the source-recompiled kernels by name at runtime.
 
+The twenty-first patch is what a 2 800-body benchmark scene (a voxel animator's
+collapsing body: convex-hull chunks in a column, locked spheres carpeting the
+ground — the scene, the snippet options that go with it and the animator's
+physics server live in the game's repository, `tools/gpu-physics/patches/`,
+applied after this series) found and fixed in the GPU pipeline on an M4 Max
+(each with its evidence in the code comments):
+
+- `contactConstraintBlockPrep.cuh`: PhysX's own per-pair friction correlation
+  (`getFrictionPatches`) is back. Patches 0007/0010 had replaced it with a
+  reuse of whatever anchors the batch slot held from an earlier frame — no
+  pair identity — so a ball dropped next to where another had bounced got a
+  sideways kick towards that spot, and a new slot's garbage anchors broke the
+  constraint.
+- `PxgContext.cpp`: the CPU's static-batch bound follows the one-batch-per-
+  contact layout that patch 0011's serial `rigidSumInternalContactAndJointBatches2`
+  builds; it assumed PhysX's 32-body packing, so the second body touching a
+  static landed out of bounds and was never solved.
+- `constraintBlockPrePrep.cu`: lane 0 reserves block-contact slots from the
+  warp-wide maximum contact count again (the series had made it lane 0's own
+  count); convex pairs with more contacts than lane 0's overran their batch.
+- `PxgCudaUtils.h`: the DMA-back handshake no longer spins on the pinned flag
+  a one-thread kernel writes — Metal does not make earlier blits visible when
+  a mid-command-buffer store is observed, and ~40 % of runs read stale or zero
+  poses — every caller falls back to its stream synchronization.
+- `cudaGJKEPA.cu`: after GJK/EPA, a contact is rejected when the support
+  functions show the hulls separated by more than the contact distance along
+  the returned direction, the centre line or a hull axis (exact; never rejects
+  a genuine contact). Under both CuMetal backends `convexConvexNphase_stage2Kernel`
+  still misjudges some distant new pairs (the typed backend: four contacts
+  metres "deep" for hulls metres apart; the legacy backend: no contacts at
+  all — `PX_CUMETAL_STAGE2_LEGACY=ON` builds it that way for comparison), so
+  this guard is a mitigation, not the fix.
+
+The `HF_DEBUG_FRICTION=1` prints in the solver and narrowphase cores
+(friction-count clears, new-pair manifolds, removal compaction against the CPU
+mirror, the pointers the narrowphase hands back) are part of it.
+
+What is still open with this series: the stage-2 kernel's compiler-level
+misjudgements above, and the runtime not being safe under PhysX's several
+worker threads driving their streams at once — the 2 800-body pile explodes
+in most runs with 4 workers and is stable in every run with 1
+(`--threads 1`).
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash

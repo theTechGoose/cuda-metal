@@ -73,12 +73,16 @@ patch_marker_is_present() {
                     "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
             ;;
         0010-cumetal-grb-rolling-friction.patch)
+            # the kernel-side marker (the "host stages the selected target's prior patch" reuse) is removed again
+            # by 0022; the solver-core side of 0010 is the durable marker
             { grep -q "prior frame's impulse is not integrated repeatedly" \
                 "${PHYSX_REPO}/physx/source/gpusolver/src/PxgCudaSolverCore.cpp" ||
                 grep -q 'prior-frame impulses are not integrated repeatedly' \
                     "${PHYSX_REPO}/physx/source/gpusolver/src/PxgCudaSolverCore.cpp"; } &&
-                grep -q "host stages the selected target's prior patch" \
-                    "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh"
+                { grep -q "host stages the selected target's prior patch" \
+                    "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh" ||
+                  grep -q 'cumetal patch 0021' \
+                    "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh"; }
             ;;
         0011-cumetal-grb-multibody-static-batching.patch)
             grep -q 'Keep each prepared batch in its own SIMD group' \
@@ -139,6 +143,10 @@ patch_marker_is_present() {
                 "${PHYSX_REPO}/physx/source/cudamanager/src/CuMetalKernelInitStubs.cpp" &&
                 grep -q 'PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels5)' \
                     "${PHYSX_REPO}/physx/source/cudamanager/src/CuMetalKernelInitStubs.cpp"
+            ;;
+        0021-gpu-pipeline-fixes.patch)
+            grep -q 'cumetal patch 0021' \
+                "${PHYSX_REPO}/physx/source/gpucommon/include/PxgCudaUtils.h"
             ;;
         *)
             return 1

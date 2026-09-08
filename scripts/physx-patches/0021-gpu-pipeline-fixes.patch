@@ -1,0 +1,424 @@
+diff --git a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+index 3347f68..f911b90 100644
+--- a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
++++ b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+@@ -12,6 +12,7 @@ IF(NOT CUMETALC_EXECUTABLE OR NOT EXISTS "${CUMETALC_EXECUTABLE}")
+ ENDIF()
+ 
+ SET(PX_CUMETAL_EMIT_MODE "xcrun" CACHE STRING "cumetalc output mode (xcrun or experimental)")
++OPTION(PX_CUMETAL_STAGE2_LEGACY "Build convexConvexNphase_stage2Kernel with the legacy PTX path like every other kernel, not the typed cumetal-ir backend" OFF)
+ SET_PROPERTY(CACHE PX_CUMETAL_EMIT_MODE PROPERTY STRINGS xcrun experimental)
+ IF(NOT PX_CUMETAL_EMIT_MODE STREQUAL "xcrun" AND
+    NOT PX_CUMETAL_EMIT_MODE STREQUAL "experimental")
+@@ -165,7 +166,7 @@ FOREACH(kernel_spec IN LISTS PX_CUMETAL_KERNEL_SPECS)
+ 	LIST(GET kernel_fields 0 kernel_source_rel)
+ 	LIST(GET kernel_fields 1 kernel_name)
+ 	SET(kernel_frontend_args --cuda-device --cuda-inline-threshold 1000000)
+-	IF(kernel_name STREQUAL "convexConvexNphase_stage2Kernel")
++	IF(kernel_name STREQUAL "convexConvexNphase_stage2Kernel" AND NOT PX_CUMETAL_STAGE2_LEGACY)
+ 		SET(kernel_frontend_args --backend=cumetal-ir)
+ 	ENDIF()
+ 	SET(kernel_source "${PHYSX_SOURCE_DIR}/${kernel_source_rel}")
+diff --git a/physx/source/gpucommon/include/PxgCudaUtils.h b/physx/source/gpucommon/include/PxgCudaUtils.h
+index 6ab5c79..b0d4eb7 100644
+--- a/physx/source/gpucommon/include/PxgCudaUtils.h
++++ b/physx/source/gpucommon/include/PxgCudaUtils.h
+@@ -103,6 +103,17 @@ namespace physx
+ 
+ 	PX_FORCE_INLINE bool spinWait(volatile PxU32& waitValue, const PxReal timeoutValue)
+ 	{
++#if PX_CUMETAL
++		// PhysX's DMA-back handshake: DtoH copies, then a one-thread kernel that writes 1 into this pinned flag, and
++		// the CPU spins on the flag. CUDA's mapped-memory ordering makes the flag imply the copies are visible. Metal
++		// makes no such promise for a store observed mid-command-buffer — shared-mode buffers are coherent with the
++		// CPU only once the command buffer completes — and the CPU did read stale or zero body poses in ~40% of
++		// runs (a falling ball at y=0 for a step, then exactly right again). Every caller falls back to a stream
++		// synchronization when the spin fails, so fail at once and let it (cumetal patch 0021).
++		PX_UNUSED(waitValue);
++		PX_UNUSED(timeoutValue);
++		return false;
++#else
+ 		PxTime time;
+ 		while (waitValue == 0)
+ 		{
+@@ -110,6 +121,7 @@ namespace physx
+ 				return false;
+ 		}
+ 		return true;
++#endif
+ 	}
+ }
+ 
+diff --git a/physx/source/gpunarrowphase/src/CUDA/cudaGJKEPA.cu b/physx/source/gpunarrowphase/src/CUDA/cudaGJKEPA.cu
+index b2e1637..9f41008 100644
+--- a/physx/source/gpunarrowphase/src/CUDA/cudaGJKEPA.cu
++++ b/physx/source/gpunarrowphase/src/CUDA/cudaGJKEPA.cu
+@@ -1395,6 +1395,50 @@ bool collide(
+ 		}
+ 	}
+ 
++#if PX_CUMETAL
++	// Under CuMetal's compilers this kernel sometimes leaves GJK/EPA believing two hulls metres apart overlap (a new
++	// pair of chunks 8 m apart got four contacts 6-10 m "deep" and the pile exploded; the CPU narrowphase and a replay
++	// with the pair within its contact offset agree the hulls are separated). A contact is impossible when the hulls
++	// are separated by more than the contact distance along any axis, so check the returned direction, the centre
++	// line and the two hulls' local axes with their support functions — exact, never rejecting a genuine contact —
++	// and report no touch when one of them separates them (cumetal patch 0021).
++	{
++		const PxVec3 axes[8] = {
++			ss_scratch.gjkOutput.direction, ss_scratch.aToB.p,
++			ss_scratch.aToB.q.getBasisVector0(), ss_scratch.aToB.q.getBasisVector1(), ss_scratch.aToB.q.getBasisVector2(),
++			PxVec3(1.f, 0.f, 0.f), PxVec3(0.f, 1.f, 0.f), PxVec3(0.f, 0.f, 1.f) };
++		bool apart = false;
++		for (PxU32 a = 0; a < 8 && !apart; ++a)
++		{
++			const PxReal len = axes[a].magnitude();
++			if (len < 1e-6f)
++				continue;
++			const PxVec3 n = axes[a] * (1.f / len);
++			PxReal minA = PX_MAX_F32, maxA = -PX_MAX_F32, minB = PX_MAX_F32, maxB = -PX_MAX_F32;
++			for (PxU32 i = threadIdx.x; i < ss_scratch.nbVertices0; i += WARP_SIZE)
++			{
++				const PxReal d = ss_scratch.vA[i].dot(n);
++				minA = fminf(minA, d); maxA = fmaxf(maxA, d);
++			}
++			for (PxU32 i = threadIdx.x; i < ss_scratch.nbVertices1; i += WARP_SIZE)
++			{
++				const PxReal d = ss_scratch.vB[i].dot(n);
++				minB = fminf(minB, d); maxB = fmaxf(maxB, d);
++			}
++			minA = warpReduction<MinOpFloat, PxReal>(FULL_MASK, minA);
++			maxA = warpReduction<MaxOpFloat, PxReal>(FULL_MASK, maxA);
++			minB = warpReduction<MinOpFloat, PxReal>(FULL_MASK, minB);
++			maxB = warpReduction<MaxOpFloat, PxReal>(FULL_MASK, maxB);
++			apart = fmaxf(minA - maxB, minB - maxA) > ss_scratch.contactDistance;
++		}
++		if (apart)
++		{
++			numManifoldContacts = 0;
++			return false;
++		}
++	}
++#endif
++
+ 	if (ss_scratch.type0 == PxGeometryType::eSPHERE)
+ 	{
+ 		// ML: we need to add the gjk / epa contacts to the manifold first.If the number of contacts after GJK / EPA in the manifold is still less than the initial number of
+diff --git a/physx/source/gpunarrowphase/src/PxgNarrowphaseCore.cpp b/physx/source/gpunarrowphase/src/PxgNarrowphaseCore.cpp
+index 5afba2c..c5fcc53 100644
+--- a/physx/source/gpunarrowphase/src/PxgNarrowphaseCore.cpp
++++ b/physx/source/gpunarrowphase/src/PxgNarrowphaseCore.cpp
+@@ -93,6 +93,10 @@
+ #include "cudamanager/PxCudaContextManager.h"
+ #include "cudamanager/PxCudaContext.h"
+ #include "PxgRadixSortKernelIndices.h"
++#if PX_CUMETAL
++#include <stdio.h>
++#include <stdlib.h>
++#endif
+ 
+ #define GPU_NP_DEBUG 0
+ #define GPU_NP_DEBUG_VERBOSE 0
+@@ -8195,6 +8199,25 @@ void PxgGpuNarrowphaseCore::prepareTempContactManagers(PxgGpuContactManagers& gp
+ 	PX_ASSERT(result == CUDA_SUCCESS);
+ 
+ 	PX_UNUSED(result);
++
++#if PX_CUMETAL
++	// HF_DEBUG_FRICTION=1: what the new pairs' manifolds hold after the initialisation — every one must be empty
++	if(::getenv("HF_DEBUG_FRICTION"))
++	{
++		// stream-ordered copies + a stream sync: a synchronous memcpy here (a device-wide sync from a task thread
++		// while other streams' work waits on this stream's unflushed batch) deadlocks CuMetal
++		const PxU32 n = PxMin(nbNewManagers, 12u);
++		static Manifold source, ms[12];
++		mCudaContext->memcpyDtoHAsync(&source, CUdeviceptr(emptyManifold), sizeof(Manifold), mStream);
++		for(PxU32 i = 0; i < n; ++i)
++			mCudaContext->memcpyDtoHAsync(&ms[i], devicePtr + i * sizeof(Manifold), sizeof(Manifold), mStream);
++		mCudaContext->streamSynchronize(mStream);
++		printf("HF manifolds: %u new (%u bytes each), empty source nbContacts %u | new:", nbNewManagers, size, *reinterpret_cast<const PxU32*>(reinterpret_cast<const PxU8*>(&source) + 15 * 16));
++		for(PxU32 i = 0; i < n; ++i)
++			printf(" %u", *reinterpret_cast<const PxU32*>(reinterpret_cast<const PxU8*>(&ms[i]) + 15 * 16));
++		printf("\n");
++	}
++#endif
+ }
+ 
+ void PxgGpuNarrowphaseCore::prepareTempContactManagers(PxgGpuContactManagers& gpuManagers, PxgNewContactManagers& newManagers)
+@@ -8455,9 +8478,35 @@ void PxgGpuNarrowphaseCore::removeLostPairs()
+ 			//KS - must sort the buffer before the DMA to ensure that there isn't a race condition in the DMA/sort algorithm that may be running in parallel with it
+ 			PxSort(mRemovedIndices[i]->begin(), mRemovedIndices[i]->size(), PxLess<PxU32>());
+ 
++			const PxU32 nbRemoved = mRemovedIndices[i]->size();
+ 			removeLostPairsGpu(i, PxgKernelIds::REMOVE_CONTACT_MANAGERS_5, true);
+ 			removeLostPairsInternal(*mRemovedIndices[i], mContactManagers[i]->mContactManagers);
+ 			//validateInputPairs(mGpuConvexConvexManagers, mGpuContactManagers, mCudaContext);
++#if PX_CUMETAL
++			// HF_DEBUG_FRICTION=1: after a removal, the GPU's compacted pair inputs must equal the CPU mirror's (the
++			// CPU mirrors the GPU's remove-and-compact algorithm); a mismatch means the compaction kernels moved
++			// the wrong pairs' data
++			if(::getenv("HF_DEBUG_FRICTION"))
++			{
++				PxgContactManagers& cpu = mContactManagers[i]->mContactManagers;
++				const PxU32 count = PxMin(cpu.mCpuContactManagerMapping.size(), 4096u);
++				static PxgContactManagerInput ins[4096];
++				mCudaContext->memcpyDtoHAsync(ins, mGpuContactManagers[i]->mContactManagers.mContactManagerInputData.getDevicePtr(), count * sizeof(PxgContactManagerInput), mStream);
++				mCudaContext->streamSynchronize(mStream);
++				PxU32 mismatches = 0, firstBad = 0xFFFFFFFF;
++				for(PxU32 k = 0; k < count; ++k)
++				{
++					const PxgContactManagerInput& in = ins[k];
++					const PxgContactManagerInput& ref = cpu.mGpuInputContactManagers[k];
++					if(in.shapeRef0 != ref.shapeRef0 || in.shapeRef1 != ref.shapeRef1 || in.transformCacheRef0 != ref.transformCacheRef0 || in.transformCacheRef1 != ref.transformCacheRef1)
++					{
++						if(firstBad == 0xFFFFFFFF) firstBad = k;
++						++mismatches;
++					}
++				}
++				printf("HF remove: bucket %u removed %u of %u -> %u pairs, %u input mismatch(es)%s%u\n", i, nbRemoved, count + nbRemoved, count, mismatches, mismatches ? ", first at " : "", mismatches ? firstBad : 0u);
++			}
++#endif
+ 		}
+ 	}
+ 
+diff --git a/physx/source/gpunarrowphase/src/PxgNphaseImplementationContext.cpp b/physx/source/gpunarrowphase/src/PxgNphaseImplementationContext.cpp
+index 6d29b5f..13866c6 100644
+--- a/physx/source/gpunarrowphase/src/PxgNphaseImplementationContext.cpp
++++ b/physx/source/gpunarrowphase/src/PxgNphaseImplementationContext.cpp
+@@ -57,6 +57,11 @@
+ #include "GuConvexGeometry.h"
+ #include "GuConvexSupport.h"
+ 
++#if PX_CUMETAL
++#include <stdio.h>
++#include <stdlib.h>
++#endif
++
+ #if PX_SUPPORT_GPU_PHYSX
+ #include "PxPhysXGpu.h"
+ #endif
+@@ -718,6 +723,53 @@ void PxgNphaseImplementationContext::mergeContactManagers(PxBaseTask* /*continua
+ 		nbFallbackPairs, mFallbackForUnsupportedCMs->getLostFoundPatchOutputCounts(), 
+ 		mFallbackForUnsupportedCMs->getLostFoundPatchManagers(), mFallbackForUnsupportedCMs->getNbLostFoundPatchManagers());
+ 
++#if PX_CUMETAL
++	// HF_DEBUG_FRICTION=1: the pointers the GPU narrowphase handed back — they must be host pointers into the
++	// pinned patch/contact streams (base + offset, the base being a kernel parameter the GPU only does arithmetic on)
++	if(::getenv("HF_DEBUG_FRICTION"))
++	{
++		for(PxU32 i = 0; i < PxMin(mTotalNbPairs, 4u); ++i)
++		{
++			const PxsContactManagerOutput& o = mContactManagerOutputs[i];
++			printf("HF np: pair %u nbContacts %u nbPatches %u contactPatches %p contactPoints %p forces %p | host bases patch %p contact %p force %p | device streams patch %p contact %p force %p\n",
++				i, o.nbContacts, o.nbPatches, (const void*)o.contactPatches, (const void*)o.contactPoints, (const void*)o.contactForces,
++				(const void*)mContext.mPatchStreamPool->mDataStream, (const void*)mContext.mContactStreamPool->mDataStream, (const void*)mContext.mForceAndIndiceStreamPool->mDataStream,
++				(const void*)mGpuNarrowphaseCore->mPatchStream, (const void*)mGpuNarrowphaseCore->mContactStream, (const void*)mGpuNarrowphaseCore->mForceAndIndiceStream);
++		}
++		// what the solver will read: the merged GPU output list (convex bucket, after the append and the DtoD copies on
++		// the solver stream) and, behind each entry, the patch and first point in the host mirror at that offset
++		PxCudaContext* cudaContext = mGpuNarrowphaseCore->mCudaContext;
++		cudaContext->streamSynchronize(mGpuNarrowphaseCore->mSolverStream);
++		cudaContext->streamSynchronize(mGpuNarrowphaseCore->mStream);
++		PxsContactManagerOutput merged[4];
++		const PxU32 nMerged = PxMin(mTotalNbPairs, 4u);
++		if(nMerged)
++			cudaContext->memcpyDtoH(merged, CUdeviceptr(mGpuNarrowphaseCore->getGPUContactManagerOutputBase()), nMerged * sizeof(PxsContactManagerOutput));
++		// the base the GPU used for its pointers: the counters restart at 0 every frame, so the smallest pointer of the
++		// frame is offset 0 — whatever address space it is in
++		size_t patchBase = size_t(-1), pointBase = size_t(-1);
++		for(PxU32 i = 0; i < mTotalNbPairs; ++i)
++		{
++			if(mContactManagerOutputs[i].nbPatches && mContactManagerOutputs[i].contactPatches) patchBase = PxMin(patchBase, size_t(mContactManagerOutputs[i].contactPatches));
++			if(mContactManagerOutputs[i].nbContacts && mContactManagerOutputs[i].contactPoints) pointBase = PxMin(pointBase, size_t(mContactManagerOutputs[i].contactPoints));
++		}
++		for(PxU32 i = 0; i < nMerged; ++i)
++		{
++			const PxsContactManagerOutput& o = merged[i];
++			const size_t patchOff = (o.nbPatches && o.contactPatches) ? size_t(o.contactPatches) - patchBase : 0;
++			const PxContactPatch* patch = (o.nbPatches && o.contactPatches && patchOff < mContext.mPatchStreamPool->mDataStreamSize) ? reinterpret_cast<const PxContactPatch*>(mContext.mPatchStreamPool->mDataStream + patchOff) : NULL;
++			const size_t pointOff = (o.nbContacts && o.contactPoints) ? size_t(o.contactPoints) - pointBase : 0;
++			const PxContact* point = (o.nbContacts && o.contactPoints && pointOff < mContext.mContactStreamPool->mDataStreamSize) ? reinterpret_cast<const PxContact*>(mContext.mContactStreamPool->mDataStream + pointOff) : NULL;
++			printf("HF merged[%u]: nbContacts %u nbPatches %u contactPatches %p contactPoints %p flags %u", i, o.nbContacts, o.nbPatches, (const void*)o.contactPatches, (const void*)o.contactPoints, o.flags);
++			if(patch)
++				printf(" | mirror patch@+%zu: n=(%.3f %.3f %.3f) nb %u start %u sf %.2f df %.2f rest %.2f", patchOff, double(patch->normal.x), double(patch->normal.y), double(patch->normal.z), patch->nbContacts, patch->startContactIndex, double(patch->staticFriction), double(patch->dynamicFriction), double(patch->restitution));
++			if(point)
++				printf(" | mirror point@+%zu: (%.3f %.3f %.3f) sep %.4f", pointOff, double(point->contact.x), double(point->contact.y), double(point->contact.z), double(point->separation));
++			printf("\n");
++		}
++	}
++#endif
++
+ 	// AD: need to make sure we're safe if fetchNarrowphaseResults did not run completely because of abort.
+ 	if (mGpuNarrowphaseCore->mCudaContext->isInAbortMode())
+ 	{
+diff --git a/physx/source/gpusolver/src/CUDA/constraintBlockPrePrep.cu b/physx/source/gpusolver/src/CUDA/constraintBlockPrePrep.cu
+index 6ff222e..496c17b 100644
+--- a/physx/source/gpusolver/src/CUDA/constraintBlockPrePrep.cu
++++ b/physx/source/gpusolver/src/CUDA/constraintBlockPrePrep.cu
+@@ -1087,11 +1087,11 @@ extern "C" __global__ void constraintContactBlockPrePrepLaunch(PxgPrePrepDesc* g
+ 			//accumulator[threadIdx.x] = contactCount;
+ 			//__syncwarp();
+ 
+-			#if PX_CUMETAL
+-			PxU32 maxCount = contactCount;
+-			#else
++			// The whole warp runs this (a = warpIndex, lanes past mDescStride carry contactCount 0), and lane 0
++			// reserves block-contact slots for the batch from maxCount — it has to be the warp-wide maximum. CuMetal's
++			// series had made it lane 0's own count, which under-allocated any batch where another lane's pair had
++			// more contacts (a convex pair has up to six): the pile exploded at 32 chunks (cumetal patch 0021).
+ 			PxU32 maxCount = warpReduction<MaxOpPxU32, PxU32>(FULL_MASK, contactCount);
+-			#endif
+ 
+ 			
+ 			if(threadIndexInWarp == 0)
+diff --git a/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh b/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh
+index df9c73b..d51374e 100644
+--- a/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh
++++ b/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh
+@@ -714,19 +714,6 @@ static __device__ void  createFinalizeSolverContactsBlockGPU(	PxgBlockContactDat
+ 	const float4 normal4 = contactData->normal_restitutionW[threadIndex];
+ 	const PxVec3 normal(normal4.x, normal4.y, normal4.z);
+ 
+-	#if PX_CUMETAL
+-	// The host stages the selected target's prior patch into the current buffer.
+-	// Snapshot it before correlation overwrites the current-frame fields.
+-	const PxU8 cachedAnchorCount = frictionPatch.anchorCount[threadIndex];
+-	const PxU8 cachedBroken = frictionPatch.broken[threadIndex];
+-	const float4 cachedBody0Normal = frictionPatch.body0Normal[threadIndex];
+-	const float4 cachedBody1Normal = frictionPatch.body1Normal[threadIndex];
+-	const float4 cachedBody0Anchor0 = fAnchor.body0Anchors[0][threadIndex];
+-	const float4 cachedBody0Anchor1 = fAnchor.body0Anchors[1][threadIndex];
+-	const float4 cachedBody1Anchor0 = fAnchor.body1Anchors[0][threadIndex];
+-	const float4 cachedBody1Anchor1 = fAnchor.body1Anchors[1][threadIndex];
+-	#endif
+-
+ 	correlatePatches(frictionPatch, contactPoints, nbContacts, normal,
+ 		bodyFrame0, bodyFrame1, PXC_SAME_NORMAL, threadIndex);
+ 
+@@ -741,23 +728,11 @@ static __device__ void  createFinalizeSolverContactsBlockGPU(	PxgBlockContactDat
+ 	//Mark the friction patch as not broken!
+ 	frictionPatch.broken[threadIndex] = 0;
+ 
+-	#if PX_CUMETAL
+-	if(!disableFriction && totalEdges != 0 && !cachedBroken &&
+-		cachedAnchorCount != 0 && cachedAnchorCount <= 2 && cachedAnchorCount <= nbContacts)
+-	{
+-		frictionPatch.contactID[0][threadIndex] = 0xff;
+-		frictionPatch.contactID[1][threadIndex] = 0xff;
+-		frictionPatch.anchorCount[threadIndex] = cachedAnchorCount;
+-		frictionPatch.body0Normal[threadIndex] = cachedBody0Normal;
+-		frictionPatch.body1Normal[threadIndex] = cachedBody1Normal;
+-		fAnchor.body0Anchors[0][threadIndex] = cachedBody0Anchor0;
+-		fAnchor.body0Anchors[1][threadIndex] = cachedBody0Anchor1;
+-		fAnchor.body1Anchors[0][threadIndex] = cachedBody1Anchor0;
+-		fAnchor.body1Anchors[1][threadIndex] = cachedBody1Anchor1;
+-		const float4 ext = cachedBody0Anchor0 - cachedBody0Anchor1;
+-		patchExtents = ext.x*ext.x + ext.y*ext.y + ext.z*ext.z;
+-	}
+-	#else
++	// CuMetal (patches 0007/0010) replaced this with a reuse of whatever anchors the batch slot held from an earlier
++	// frame — no pair identity, no correlation check — so a pair landing in a slot another pair had vacated inherited
++	// that pair's anchors (a ball dropped next to where another had bounced got a sideways kick towards that spot),
++	// and a new slot's garbage anchors broke the constraint. PhysX's own lookup of this pair's previous patch, below,
++	// compiles and runs under CuMetal; the hack is gone (cumetal patch 0021).
+ 	if (!(perPointFriction || disableFriction) && totalEdges != 0 &&
+ 		prevFrictionStartIndex != 0xFFFFFFFF && data.prevFrictionPatchCount != 0 &&
+ 		prevFrictionIndices && prevFrictionPatches && prevFrictionAnchors)// || (solverBodyData0.islandNodeIndex & 2) || (solverBodyData1.islandNodeIndex & 2)))
+@@ -765,7 +740,6 @@ static __device__ void  createFinalizeSolverContactsBlockGPU(	PxgBlockContactDat
+ 		getFrictionPatches(frictionPatch, fAnchor, prevFrictionIndices, prevFrictionStartIndex, prevFrictionPatches, prevFrictionAnchors, data.prevFrictionPatchCount, bodyFrame0, bodyFrame1, correlationDistance, threadIndex, totalEdges, patchExtents,
+ 			nbContacts);
+ 	}
+-	#endif
+ 
+ 	if(!disableFriction)
+ 		growPatches(frictionPatch, fAnchor, contactPoints, nbContacts, bodyFrame0, bodyFrame1, frictionOffsetThreshold + data.restDistance, threadIndex, patchExtents);
+diff --git a/physx/source/gpusolver/src/PxgContext.cpp b/physx/source/gpusolver/src/PxgContext.cpp
+index d796ea3..7b5822f 100644
+--- a/physx/source/gpusolver/src/PxgContext.cpp
++++ b/physx/source/gpusolver/src/PxgContext.cpp
+@@ -1882,8 +1882,22 @@ namespace physx
+ 		const PxU32 totalStaticRigidContacts = bodyManager.mTotalStaticRBContacts;
+ 		const PxU32 totalStaticRigidJoints = bodyManager.mTotalStaticRBJoints;
+ 
++#if PX_CUMETAL
++		// CuMetal's serial rigidSumInternalContactAndJointBatches2 (patch 0011) emits one stride-1 batch per
++		// rigid/static contact instead of packing up to 32 bodies into a batch, and writes that count into the GPU
++		// descriptor. The bound below assumed the packing, so every allocation and launch grid sized from it was
++		// short by up to 32x as soon as more than one body touched a static — the second body's batch landed out of
++		// bounds and it was never solved (a ball dropped next to a resting one fell through the ground until the
++		// resting one slept). Size for what the GPU actually builds (cumetal patch 0021).
++		PX_UNUSED(nbRigidBatches);
++		PX_UNUSED(maxStaticRigidContacts);
++		PX_UNUSED(maxStaticRigidJoints);
++		mNumStaticRigidContactBatches = totalStaticRigidContacts;
++		mNumStaticRigid1dConstraintBatches = totalStaticRigidJoints;
++#else
+ 		mNumStaticRigidContactBatches = PxMin(maxStaticRigidContacts * nbRigidBatches, totalStaticRigidContacts);
+ 		mNumStaticRigid1dConstraintBatches = PxMin(maxStaticRigidJoints * nbRigidBatches, totalStaticRigidJoints);
++#endif
+ 		mNumRigidStaticConstraintBatches = (mNumStaticRigidContactBatches + mNumStaticRigid1dConstraintBatches);
+ 
+ 		mNumArticConstraintBatches = mIncrementalPartition.getNbArtiConstraintBatches() + mIncrementalPartition.getNbArtiContactBatches();
+diff --git a/physx/source/gpusolver/src/PxgCudaSolverCore.cpp b/physx/source/gpusolver/src/PxgCudaSolverCore.cpp
+index 7b3b070..c2eb2f3 100644
+--- a/physx/source/gpusolver/src/PxgCudaSolverCore.cpp
++++ b/physx/source/gpusolver/src/PxgCudaSolverCore.cpp
+@@ -56,6 +56,10 @@
+ #include "PxgFEMClothCore.h"
+ #include "PxgKernelWrangler.h"
+ #include "PxgKernelIndices.h"
++#if PX_CUMETAL
++#include <stdio.h>
++#include <stdlib.h>
++#endif
+ #include "PxgHeapMemAllocator.h"
+ #include "PxgConstraintWriteBack.h"
+ #include "PxgSolverConstraint1D.h"
+@@ -391,6 +395,24 @@ void PxgCudaSolverCore::gpuMemDMAUpContactData(PxgPinnedHostLinearMemoryAllocato
+ 		PX_UNUSED(result);
+ 	}
+ 
++#if PX_CUMETAL
++	// HF_DEBUG_FRICTION=1: what the previous-frame friction patch counts look like after the clear — the counts a
++	// new or re-slotted edge would otherwise inherit (a stale count makes constraint prep read another pair's patch)
++	if(::getenv("HF_DEBUG_FRICTION"))
++	{
++		mCudaContext->streamSynchronize(mStream);
++		const PxU32 n = PxMin(PxU32(mFrictionPatchCounts[1 - mCurrentIndex].getSize() / sizeof(PxU32)), 16u);
++		PxU32 counts[16];
++		if(n)
++			mCudaContext->memcpyDtoH(counts, mFrictionPatchCounts[1 - mCurrentIndex].getDevicePtr(), n * sizeof(PxU32));
++		printf("HF friction: buffer %u, cleared %u edge(s) [", 1 - mCurrentIndex, nbDestroyedEdges);
++		for(PxU32 i = 0; i < nbDestroyedEdges; ++i) printf("%s%u", i ? " " : "", destroyedEdges[i]);
++		printf("], prev counts [");
++		for(PxU32 i = 0; i < n; ++i) printf("%s%u", i ? " " : "", counts[i]);
++		printf("]\n");
++	}
++#endif
++
+ 	mCudaContext->streamFlush(mStream);	// PT: TODO: why is it commented out in PxgTGSCudaSolverCore::gpuMemDMAUpContactData?
+ 
+ #if GPU_DEBUG
+@@ -641,6 +663,22 @@ void PxgCudaSolverCore::gpuMemDMAUp(PxgPinnedHostLinearMemoryAllocator& hostAllo
+ 	mCudaContext->memcpyHtoDAsync(mRigidStaticContactCounts.getDevicePtr(), rigidStaticContactCounts, sizeof(PxU32)*islandContextPool->mBodyCount, mStream);
+ 	mCudaContext->memcpyHtoDAsync(mRigidStaticJointCounts.getDevicePtr(), rigidStaticJointCounts, sizeof(PxU32)*islandContextPool->mBodyCount, mStream);
+ 
++#if PX_CUMETAL
++	// HF_DEBUG_FRICTION=1: the static-contact bookkeeping the CPU hands the solver — per body, how many contacts
++	// against statics and which unique contact indices (layout body + nbBodies * i), plus the batch counts
++	if(::getenv("HF_DEBUG_FRICTION"))
++	{
++		const PxU32 nb = islandContextPool->mBodyCount;
++		printf("HF static: bodies %u (start %u) slabs %u staticSlabs %u maxStaticPartitions %u | batches %u static %u | counts [",
++			nb, islandContextPool->mBodyStartIndex, numSlabs, mNbStaticRigidSlabs, mMaxNumStaticPartitions,
++			totalContactBatches, islandContextPool->mStaticRigidBatchCount);
++		for(PxU32 b = 0; b < PxMin(nb, 8u); ++b) printf("%s%u", b ? " " : "", rigidStaticContactCounts[b]);
++		printf("] indices [");
++		for(PxU32 i = 0; i < PxMin(rigidStaticContactIndSize, 8u); ++i) printf("%s%u", i ? " " : "", rigidStaticContactIndices[i]);
++		printf("]\n");
++	}
++#endif
++
+ 	mArtiStaticContactIndices.allocate(artiStaticContactIndSize*sizeof(PxU32), PX_FL);
+ 	mArtiStaticJointIndices.allocate(artiStaticJointSize * sizeof(PxU32), PX_FL);
+ 	mArtiStaticContactCounts.allocate(nbArticulations * sizeof(PxU32), PX_FL);
