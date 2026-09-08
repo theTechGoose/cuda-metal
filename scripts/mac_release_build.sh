@@ -114,6 +114,30 @@ if [ -n "$SIGN_IDENTITY" ]; then
                           -type f -perm +111 2>/dev/null)
     codesign --verify --deep --strict "$STAGE_DIR/lib/libcumetal.dylib"
     echo "  signed and verified"
+
+    # Signing alone is not enough: Gatekeeper rejects a signed-but-unnotarized
+    # download just as it rejects an ad-hoc one. Notarization uploads the artifact
+    # to Apple, who scan it and issue a ticket that gets stapled to the tarball.
+    # Requires credentials stored once with:
+    #   xcrun notarytool store-credentials cumetal --apple-id ... --team-id ... --password ...
+    if [ -n "${CUMETAL_NOTARY_PROFILE:-}" ]; then
+        step "Notarize (${CUMETAL_NOTARY_PROFILE})"
+        NOTARY_ZIP="dist/notarize.zip"
+        rm -f "$NOTARY_ZIP"
+        ditto -c -k --keepParent "$STAGE_DIR" "$NOTARY_ZIP"
+        xcrun notarytool submit "$NOTARY_ZIP" \
+            --keychain-profile "$CUMETAL_NOTARY_PROFILE" --wait
+        # A tarball cannot carry a stapled ticket the way a .app or .dmg can, so
+        # the binaries are validated online at first launch instead. Confirm the
+        # submission was accepted rather than assuming it.
+        xcrun notarytool history --keychain-profile "$CUMETAL_NOTARY_PROFILE" \
+            | head -5
+        rm -f "$NOTARY_ZIP"
+        echo "  notarized"
+    else
+        echo "  NOT notarized: set CUMETAL_NOTARY_PROFILE to a stored notarytool"
+        echo "  profile. Gatekeeper rejects a signed-but-unnotarized download."
+    fi
 else
     step "Codesign (skipped)"
     echo "  no Developer ID Application certificate on this machine."
