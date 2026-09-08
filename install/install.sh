@@ -28,6 +28,15 @@ PREFIX="$(cd "$PREFIX" && pwd -P)"
 
 cmake --install "$BUILD_DIR" --prefix "$PREFIX"
 
+# A tarball downloaded through a browser carries com.apple.quarantine on every
+# file, and dyld refuses to load a quarantined unsigned dylib -- which presents
+# as a cryptic load failure, not as a security prompt. The user has explicitly
+# chosen to install at this point, so clear it here rather than leaving them to
+# find `xattr -dr` in a README, or worse, to turn Gatekeeper off.
+if command -v xattr >/dev/null 2>&1; then
+  xattr -dr com.apple.quarantine "$PREFIX" 2>/dev/null || true
+fi
+
 install -m 755 "$(dirname "$0")/uninstall.sh" "$PREFIX/uninstall.sh"
 mkdir -p "$PREFIX/share/cumetal"
 if [[ -f "$BUILD_DIR/install_manifest.txt" ]]; then

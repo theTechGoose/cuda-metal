@@ -2579,6 +2579,156 @@ $L_done:
         return 1;
     }
 
+
+    // ---------------------------------------------------------------- narrowing
+    //
+    // cvt.rn.f32.f64(cvt.f64.f32(x)) is the identity, so both emulated
+    // conversions are removable. The dangerous half of that optimisation is
+    // knowing when it does NOT hold: across a branch, after a redefinition, or
+    // under a directed rounding mode. The suite's own corpus contains three
+    // widening conversions in total and cannot exercise any of this, so the
+    // negative cases are pinned here explicitly.
+    const char* roundtrip_ptx = R"PTX(
+.version 7.0
+.target sm_70
+.address_size 64
+.visible .entry rt_straightline(.param .u64 o, .param .u64 i)
+{
+    .reg .b64 %rd<4>;
+    .reg .f32 %f<4>;
+    .reg .f64 %fd<3>;
+    ld.param.u64 %rd1, [o];
+    ld.param.u64 %rd2, [i];
+    ld.global.f32 %f1, [%rd2];
+    cvt.f64.f32 %fd1, %f1;
+    cvt.rn.f32.f64 %f2, %fd1;
+    st.global.f32 [%rd1], %f2;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions rt_options;
+    rt_options.entry_name = "rt_straightline";
+    rt_options.strict = true;
+    rt_options.fp64_mode = cumetal::ptx::Fp64Mode::kWide48;
+    const auto rt_lowered = cumetal::ptx::lower_ptx_to_llvm_ir(roundtrip_ptx, rt_options);
+    // The narrowing call is what gets deleted. The widening call is still emitted
+    // (its result simply goes unused); removing dead calls is the optimiser's job,
+    // not this lowering's.
+    if (!expect(rt_lowered.ok &&
+                    !contains(rt_lowered.llvm_ir, "vf64_f64_to_f32"),
+                "widen/narrow round trip is eliminated in straight-line code")) {
+        if (!rt_lowered.ok) std::fprintf(stderr, "  error: %s\n", rt_lowered.error.c_str());
+        return 1;
+    }
+
+    // The f64 is redefined between the widen and the narrow, so the tracked
+    // value is stale and forwarding it would emit the wrong number.
+    const char* clobber_ptx = R"PTX(
+.version 7.0
+.target sm_70
+.address_size 64
+.visible .entry rt_clobbered(.param .u64 o, .param .u64 i)
+{
+    .reg .b64 %rd<4>;
+    .reg .f32 %f<4>;
+    .reg .f64 %fd<4>;
+    ld.param.u64 %rd1, [o];
+    ld.param.u64 %rd2, [i];
+    ld.global.f32 %f1, [%rd2];
+    cvt.f64.f32 %fd1, %f1;
+    add.f64 %fd1, %fd1, %fd1;
+    cvt.rn.f32.f64 %f2, %fd1;
+    st.global.f32 [%rd1], %f2;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions clobber_options;
+    clobber_options.entry_name = "rt_clobbered";
+    clobber_options.strict = true;
+    clobber_options.fp64_mode = cumetal::ptx::Fp64Mode::kWide48;
+    const auto clobber_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(clobber_ptx, clobber_options);
+    if (!expect(clobber_lowered.ok &&
+                    contains(clobber_lowered.llvm_ir, "vf64_f64_to_f32"),
+                "a redefinition between widen and narrow blocks the forward")) {
+        if (!clobber_lowered.ok) {
+            std::fprintf(stderr, "  error: %s\n", clobber_lowered.error.c_str());
+        }
+        return 1;
+    }
+
+    // The narrow sits in a different basic block; the widen may not have
+    // executed on the path that reaches it.
+    const char* branch_ptx = R"PTX(
+.version 7.0
+.target sm_70
+.address_size 64
+.visible .entry rt_branch(.param .u64 o, .param .u64 i, .param .u32 n)
+{
+    .reg .b64 %rd<4>;
+    .reg .f32 %f<4>;
+    .reg .f64 %fd<3>;
+    .reg .b32 %r<3>;
+    .reg .pred %p<2>;
+    ld.param.u64 %rd1, [o];
+    ld.param.u64 %rd2, [i];
+    ld.param.u32 %r1, [n];
+    ld.global.f32 %f1, [%rd2];
+    cvt.f64.f32 %fd1, %f1;
+    setp.gt.s32 %p1, %r1, 0;
+    @%p1 bra SKIP;
+    mov.f64 %fd1, 0d4000000000000000;
+SKIP:
+    cvt.rn.f32.f64 %f2, %fd1;
+    st.global.f32 [%rd1], %f2;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions branch_options;
+    branch_options.entry_name = "rt_branch";
+    branch_options.strict = true;
+    branch_options.fp64_mode = cumetal::ptx::Fp64Mode::kWide48;
+    const auto branch_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(branch_ptx, branch_options);
+    if (!expect(branch_lowered.ok &&
+                    contains(branch_lowered.llvm_ir, "vf64_f64_to_f32"),
+                "a branch between widen and narrow blocks the forward")) {
+        if (!branch_lowered.ok) {
+            std::fprintf(stderr, "  error: %s\n", branch_lowered.error.c_str());
+        }
+        return 1;
+    }
+
+    // Directed rounding is a real request, not a round trip: cvt.rz truncates.
+    const char* rz_ptx = R"PTX(
+.version 7.0
+.target sm_70
+.address_size 64
+.visible .entry rt_directed(.param .u64 o, .param .u64 i)
+{
+    .reg .b64 %rd<4>;
+    .reg .f32 %f<4>;
+    .reg .f64 %fd<3>;
+    ld.param.u64 %rd1, [o];
+    ld.param.u64 %rd2, [i];
+    ld.global.f32 %f1, [%rd2];
+    cvt.f64.f32 %fd1, %f1;
+    cvt.rz.f32.f64 %f2, %fd1;
+    st.global.f32 [%rd1], %f2;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions rz_options;
+    rz_options.entry_name = "rt_directed";
+    rz_options.strict = true;
+    rz_options.fp64_mode = cumetal::ptx::Fp64Mode::kWide48;
+    const auto rz_lowered = cumetal::ptx::lower_ptx_to_llvm_ir(rz_ptx, rz_options);
+    if (!expect(rz_lowered.ok && contains(rz_lowered.llvm_ir, "vf64_f64_to_f32"),
+                "a directed rounding mode is not treated as a round trip")) {
+        if (!rz_lowered.ok) std::fprintf(stderr, "  error: %s\n", rz_lowered.error.c_str());
+        return 1;
+    }
+
     std::printf("PASS: ptx lower-to-llvm unit tests\n");
     return 0;
 }

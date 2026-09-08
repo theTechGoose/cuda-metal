@@ -99,6 +99,29 @@ rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 cmake --install "$BUILD_DIR" --prefix "$STAGE_DIR"
 
+# Sign with a Developer ID when the machine has one. Gatekeeper quarantines an
+# unsigned download, and the fix a user reaches for -- disabling Gatekeeper --
+# is worse than the problem. This is detection, not configuration: the day a
+# certificate exists, releases are signed with no further change here.
+SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+if [ -n "$SIGN_IDENTITY" ]; then
+    step "Codesign ($SIGN_IDENTITY)"
+    while IFS= read -r binary; do
+        codesign --force --timestamp --options runtime \
+                 --sign "$SIGN_IDENTITY" "$binary"
+    done < <(command find "$STAGE_DIR/bin" "$STAGE_DIR/lib" "$STAGE_DIR/libexec" \
+                          -type f -perm +111 2>/dev/null)
+    codesign --verify --deep --strict "$STAGE_DIR/lib/libcumetal.dylib"
+    echo "  signed and verified"
+else
+    step "Codesign (skipped)"
+    echo "  no Developer ID Application certificate on this machine."
+    echo "  The artifact is UNSIGNED: macOS will quarantine it on download."
+    echo "  install.sh clears the quarantine attribute at install time, so the"
+    echo "  tarball still works; a signed build needs an Apple Developer cert."
+fi
+
 install -m 755 install/uninstall.sh "$STAGE_DIR/uninstall.sh"
 install -m 644 LICENSE "$STAGE_DIR/LICENSE"
 install -m 644 README.md "$STAGE_DIR/README.md"
