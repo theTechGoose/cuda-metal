@@ -2598,47 +2598,104 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
                           sharedMemBytes, hStream, kernelParams, nullptr);
 }
 
-// Memset 16/32-bit variants backed by the existing 8-bit path (via loop for correctness).
-CUresult cuMemsetD16(CUdeviceptr dstDevice, unsigned short us, size_t N) {
+// Memset 16/32-bit variants: host-coherent fills. The synchronous ones wait for
+// the device first, as cudaMemset does; the async ones are enqueued in the
+// stream timeline, as the 2D variants below are. They used to write through
+// the host pointer immediately, ignoring the stream: with the CPU running
+// ahead of the GPU queue a per-frame clear then landed before the previous
+// frame's still-pending kernels, which dirtied it again. PhysX's rigid-body
+// pipeline clears its solver, narrowphase and activation buffers that way
+// every step (memsetD32Async between dependent launches), and lost contacts
+// and inherited stale friction data from it -- invisible with
+// CUMETAL_SYNC_EACH_LAUNCH=1, which serialises everything.
+namespace {
+
+// The host-coherent target of a typed memset, or null when there is none.
+void* typed_memset_target(CUdeviceptr dstDevice, size_t bytes) {
     if (dstDevice == 0) {
-        return CUDA_ERROR_INVALID_VALUE;
+        return nullptr;
     }
-    auto* ptr = static_cast<unsigned short*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<uintptr_t>(dstDevice)),
-        N * sizeof(unsigned short)));
+    return cumetalRuntimeGetHostPointer(
+        reinterpret_cast<const void*>(static_cast<uintptr_t>(dstDevice)), bytes);
+}
+
+// What a synchronous typed memset does before its fill: context, then the device.
+CUresult typed_memset_sync_prologue(const void* ptr) {
     if (ptr == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
     }
-    for (size_t i = 0; i < N; ++i) {
-        ptr[i] = us;
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) {
+        return ready;
     }
+    return map_cuda_error(cudaDeviceSynchronize());
+}
+
+struct Fill16Payload { unsigned short* ptr; size_t count; unsigned short value; };
+struct Fill32Payload { unsigned int* ptr; size_t count; unsigned int value; };
+
+}  // namespace
+
+CUresult cuMemsetD16(CUdeviceptr dstDevice, unsigned short us, size_t N) {
+    auto* ptr = static_cast<unsigned short*>(typed_memset_target(dstDevice, N * sizeof(unsigned short)));
+    const CUresult ready = typed_memset_sync_prologue(ptr);
+    if (ready != CUDA_SUCCESS) {
+        return ready;
+    }
+    std::fill_n(ptr, N, us);
     return CUDA_SUCCESS;
 }
 
 CUresult cuMemsetD32(CUdeviceptr dstDevice, unsigned int ui, size_t N) {
-    if (dstDevice == 0) {
-        return CUDA_ERROR_INVALID_VALUE;
+    auto* ptr = static_cast<unsigned int*>(typed_memset_target(dstDevice, N * sizeof(unsigned int)));
+    const CUresult ready = typed_memset_sync_prologue(ptr);
+    if (ready != CUDA_SUCCESS) {
+        return ready;
     }
-    auto* ptr = static_cast<unsigned int*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<uintptr_t>(dstDevice)),
-        N * sizeof(unsigned int)));
-    if (ptr == nullptr) {
-        return CUDA_ERROR_INVALID_VALUE;
-    }
-    for (size_t i = 0; i < N; ++i) {
-        ptr[i] = ui;
-    }
+    std::fill_n(ptr, N, ui);
     return CUDA_SUCCESS;
 }
 
-CUresult cuMemsetD16Async(CUdeviceptr dstDevice, unsigned short us, size_t N,
-                           CUstream /*hStream*/) {
-    return cuMemsetD16(dstDevice, us, N);
+CUresult cuMemsetD16Async(CUdeviceptr dstDevice, unsigned short us, size_t N, CUstream hStream) {
+    auto* ptr = static_cast<unsigned short*>(typed_memset_target(dstDevice, N * sizeof(unsigned short)));
+    if (ptr == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) {
+        return ready;
+    }
+    auto* payload = new (std::nothrow) Fill16Payload{ptr, N, us};
+    if (!payload) return CUDA_ERROR_OUT_OF_MEMORY;
+    const cudaError_t status = cudaLaunchHostFunc(
+        reinterpret_cast<cudaStream_t>(hStream),
+        [](void* opaque) {
+            std::unique_ptr<Fill16Payload> data(static_cast<Fill16Payload*>(opaque));
+            std::fill_n(data->ptr, data->count, data->value);
+        }, payload);
+    if (status != cudaSuccess) delete payload;
+    return map_cuda_error(status);
 }
 
-CUresult cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui, size_t N,
-                           CUstream /*hStream*/) {
-    return cuMemsetD32(dstDevice, ui, N);
+CUresult cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui, size_t N, CUstream hStream) {
+    auto* ptr = static_cast<unsigned int*>(typed_memset_target(dstDevice, N * sizeof(unsigned int)));
+    if (ptr == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) {
+        return ready;
+    }
+    auto* payload = new (std::nothrow) Fill32Payload{ptr, N, ui};
+    if (!payload) return CUDA_ERROR_OUT_OF_MEMORY;
+    const cudaError_t status = cudaLaunchHostFunc(
+        reinterpret_cast<cudaStream_t>(hStream),
+        [](void* opaque) {
+            std::unique_ptr<Fill32Payload> data(static_cast<Fill32Payload*>(opaque));
+            std::fill_n(data->ptr, data->count, data->value);
+        }, payload);
+    if (status != cudaSuccess) delete payload;
+    return map_cuda_error(status);
 }
 
 // 2D strided memset — fills Width elements per row for Height rows (pitch stride).

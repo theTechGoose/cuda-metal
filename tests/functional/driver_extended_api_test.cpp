@@ -1,9 +1,11 @@
 #include "cuda.h"
 
+#include <chrono>
 #include <cstdio>
+#include <thread>
 
 // Tests driver API additions: occupancy, func attrs, stream priority, cooperative launch,
-// memset 16/32, device capability, peer access.
+// memset 16/32 (and their async variants' stream order), device capability, peer access.
 
 int main() {
     if (cuInit(0) != CUDA_SUCCESS) {
@@ -149,12 +151,67 @@ int main() {
         }
     }
 
+    // --- cuMemsetD32Async / cuMemsetD16Async are stream-ordered ---
+    // Queued ahead of the memsets: a host op that sleeps, then an async copy
+    // (from pinned memory, so it is truly asynchronous) that fills the buffers
+    // with 0x11... The memsets must land after both (CUDA stream order), so the
+    // buffers end with the memset value. An immediate host-side fill fails
+    // this: the later copy overwrites it. PhysX clears its per-frame solver
+    // and narrowphase buffers with memsetD32Async between dependent launches.
+    CUstream order_stream = nullptr;
+    if (cuStreamCreate(&order_stream, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cuStreamCreate for the memset ordering test failed\n");
+        return 1;
+    }
+    void* pinned = nullptr;
+    if (cuMemHostAlloc(&pinned, 8 * sizeof(unsigned int), 0) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cuMemHostAlloc for the memset ordering test failed\n");
+        return 1;
+    }
+    for (int i = 0; i < 8; ++i) static_cast<unsigned int*>(pinned)[i] = 0x11111111u;
+    if (cuLaunchHostFunc(order_stream, [](void*) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }, nullptr) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cuLaunchHostFunc for the memset ordering test failed\n");
+        return 1;
+    }
+    if (cuMemcpyHtoDAsync(dev32, pinned, 8 * sizeof(unsigned int), order_stream) != CUDA_SUCCESS ||
+        cuMemcpyHtoDAsync(dev16, pinned, 8 * sizeof(unsigned short), order_stream) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cuMemcpyHtoDAsync for the memset ordering test failed\n");
+        return 1;
+    }
+    if (cuMemsetD32Async(dev32, 0x22222222u, 8, order_stream) != CUDA_SUCCESS ||
+        cuMemsetD16Async(dev16, 0x2222u, 8, order_stream) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cuMemsetD32Async/cuMemsetD16Async failed\n");
+        return 1;
+    }
+    if (cuStreamSynchronize(order_stream) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cuStreamSynchronize after the ordered memsets failed\n");
+        return 1;
+    }
+    if (cuMemcpyDtoH(host32, dev32, 8 * sizeof(unsigned int)) != CUDA_SUCCESS ||
+        cuMemcpyDtoH(host16, dev16, 8 * sizeof(unsigned short)) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cuMemcpyDtoH for the ordering verify failed\n");
+        return 1;
+    }
+    for (int i = 0; i < 8; ++i) {
+        if (host32[i] != 0x22222222u || host16[i] != 0x2222u) {
+            std::fprintf(stderr,
+                         "FAIL: async memset ran out of stream order: host32[%d]=%08x host16[%d]=%04x "
+                         "(expected 0x22222222 / 0x2222 -- the memset must land after the queued copy)\n",
+                         i, host32[i], i, static_cast<unsigned>(host16[i]));
+            return 1;
+        }
+    }
+    cuMemFreeHost(pinned);
+    cuStreamDestroy(order_stream);
+
     cuMemFree(dev16);
     cuMemFree(dev32);
     cuCtxDestroy(ctx);
 
     std::printf(
-        "PASS: driver extended API — occupancy, func attrs, stream priority, memset16/32, "
+        "PASS: driver extended API — occupancy, func attrs, stream priority, memset16/32 (+ stream order), "
         "device capability\n");
     return 0;
 }

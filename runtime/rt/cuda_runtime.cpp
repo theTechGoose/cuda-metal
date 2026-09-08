@@ -353,6 +353,9 @@ struct CUevent_st {
     bool timing_valid = false;
     std::shared_ptr<cumetal::metal_backend::Stream> stream;
     std::uint64_t ticket = 0;
+    // The stream's pending-restore sequence at record time: waiting on this
+    // event makes the device-to-host blits up to here visible to the CPU.
+    std::uint64_t restore_seq = 0;
     std::chrono::steady_clock::time_point timestamp{};
     // During stream capture an event carries the graph frontier to a stream
     // that waits on it. CUDA uses this to join event-linked streams into the
@@ -1364,6 +1367,82 @@ void restore_embedded_host_pointers(std::vector<std::uint8_t>* bytes) {
     }
 }
 
+// A device-to-host copy whose destination is pinned memory is a Metal blit: a
+// raw byte copy in the stream's command buffer, so the pointer restore the
+// host-function path applies (restore_embedded_host_pointers) never ran on it,
+// and the CPU read GPU virtual addresses out of PhysX's contact-manager
+// outputs and crashed dereferencing them. The blit cannot restore in place
+// while the GPU may still be writing; the CPU can only legitimately read the
+// destination after a synchronization, so each blit is noted here and the
+// restore runs at the next stream/event/device synchronization that covers it.
+// Restoring twice is harmless: a host address resolves to itself.
+struct PendingRestore {
+    void* host_dst = nullptr;
+    std::size_t count = 0;
+    std::uint64_t seq = 0;
+};
+
+struct RestoreBook {
+    std::mutex mutex;
+    std::unordered_map<const void*, std::vector<PendingRestore>> by_stream;
+    std::unordered_map<const void*, std::uint64_t> seq_by_stream;
+};
+
+RestoreBook& restore_book() {
+    static RestoreBook book;
+    return book;
+}
+
+std::uint64_t restore_seq_of_stream(const void* stream_key) {
+    RestoreBook& book = restore_book();
+    std::lock_guard<std::mutex> lock(book.mutex);
+    return book.seq_by_stream[stream_key];
+}
+
+void note_dtoh_blit(const void* stream_key, void* host_dst, std::size_t count) {
+    if (host_dst == nullptr || count < sizeof(std::uintptr_t)) return;
+    RestoreBook& book = restore_book();
+    std::lock_guard<std::mutex> lock(book.mutex);
+    const std::uint64_t seq = ++book.seq_by_stream[stream_key];
+    book.by_stream[stream_key].push_back(PendingRestore{host_dst, count, seq});
+}
+
+void apply_pending_restores(const void* stream_key, std::uint64_t up_to_seq) {
+    std::vector<PendingRestore> due;
+    {
+        RestoreBook& book = restore_book();
+        std::lock_guard<std::mutex> lock(book.mutex);
+        auto it = book.by_stream.find(stream_key);
+        if (it == book.by_stream.end()) return;
+        std::vector<PendingRestore>& pending = it->second;
+        std::vector<PendingRestore> keep;
+        for (const PendingRestore& entry : pending) {
+            (entry.seq <= up_to_seq ? due : keep).push_back(entry);
+        }
+        pending.swap(keep);
+    }
+    for (const PendingRestore& entry : due) {
+        std::vector<std::uint8_t> staged(entry.count);
+        std::memcpy(staged.data(), entry.host_dst, entry.count);
+        restore_embedded_host_pointers(&staged);
+        std::memcpy(entry.host_dst, staged.data(), entry.count);
+    }
+}
+
+void apply_all_pending_restores() {
+    std::vector<const void*> keys;
+    {
+        RestoreBook& book = restore_book();
+        std::lock_guard<std::mutex> lock(book.mutex);
+        for (const auto& entry : book.by_stream) {
+            if (!entry.second.empty()) keys.push_back(entry.first);
+        }
+    }
+    for (const void* key : keys) {
+        apply_pending_restores(key, std::numeric_limits<std::uint64_t>::max());
+    }
+}
+
 bool use_metal_device_addresses() {
     const char* value = std::getenv("CUMETAL_USE_METAL_DEVICE_ADDRESSES");
     return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0 &&
@@ -1764,12 +1843,18 @@ cudaError_t update_event_completion(cudaEvent_t event, bool wait_for_completion)
         }
     }
 
-    std::lock_guard<std::mutex> lock(event->mutex);
-    event->complete = true;
-    if (!event->disable_timing && !event->timing_valid) {
-        event->timestamp = std::chrono::steady_clock::now();
-        event->timing_valid = true;
+    std::uint64_t restore_seq = 0;
+    {
+        std::lock_guard<std::mutex> lock(event->mutex);
+        event->complete = true;
+        restore_seq = event->restore_seq;
+        if (!event->disable_timing && !event->timing_valid) {
+            event->timestamp = std::chrono::steady_clock::now();
+            event->timing_valid = true;
+        }
     }
+    // the blits recorded before this event have landed: the CPU may read them now
+    apply_pending_restores(stream.get(), restore_seq);
     return cudaSuccess;
 }
 
@@ -3501,6 +3586,11 @@ cudaError_t cudaMemcpyAsync(void* dst,
                 dst_alloc.buffer, dst_alloc.offset, src_alloc.buffer, src_alloc.offset, count,
                 backend_stream, &error);
             if (blit_status == cudaSuccess) {
+                if (resolved_kind == cudaMemcpyDeviceToHost) {
+                    // the pointer restore the host-function path does in line: deferred to the
+                    // synchronization after which the CPU may read the destination
+                    note_dtoh_blit(backend_stream.get(), host_accessible_pointer(dst, count), count);
+                }
                 if (trace_enabled()) {
                     char buf[128];
                     std::snprintf(buf, sizeof(buf),
@@ -4205,6 +4295,7 @@ cudaError_t cudaDeviceSynchronize(void) {
     if (status != cudaSuccess) {
         return fail(status);
     }
+    apply_all_pending_restores();
     return fail(pending_launch_error);
 }
 
@@ -4384,6 +4475,9 @@ cudaError_t cudaStreamSynchronize(cudaStream_t stream) {
 
     std::string error;
     const cudaError_t status = cumetal::metal_backend::stream_synchronize(backend_stream, &error);
+    if (status == cudaSuccess) {
+        apply_pending_restores(backend_stream.get(), std::numeric_limits<std::uint64_t>::max());
+    }
     return fail(status);
 }
 
@@ -4411,6 +4505,9 @@ cudaError_t cudaStreamQuery(cudaStream_t stream) {
         cumetal::metal_backend::stream_query_ticket(backend_stream, tail_ticket, &complete, &error);
     if (query_status != cudaSuccess) {
         return fail(query_status);
+    }
+    if (complete) {
+        apply_pending_restores(backend_stream.get(), std::numeric_limits<std::uint64_t>::max());
     }
     return fail(complete ? cudaSuccess : cudaErrorNotReady);
 }
@@ -5694,10 +5791,12 @@ cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
         return fail(marker_status);
     }
 
+    const std::uint64_t restore_seq = restore_seq_of_stream(backend_stream.get());
     {
         std::lock_guard<std::mutex> lock(event->mutex);
         event->stream = std::move(backend_stream);
         event->ticket = marker_ticket;
+        event->restore_seq = restore_seq;
         event->recorded_once = true;
         event->complete = false;
         event->timing_valid = !event->disable_timing;
