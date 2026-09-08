@@ -6,6 +6,8 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-08
+
 ### Fixed
 
 - **Contact reporting on the GPU no longer crashes the host: a device-to-host blit into
