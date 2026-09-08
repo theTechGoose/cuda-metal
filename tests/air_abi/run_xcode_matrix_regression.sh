@@ -89,13 +89,29 @@ run_for_toolchain() {
   DEVELOPER_DIR="$developer_dir" xcrun metallib "$out_air" -o "$out_metallib"
   "$AIR_INSPECT" "$out_metallib" > "$out_txt"
 
+  # The dialect is a property of the toolchain, not a constant: Xcode 16.4 emits
+  # AIR 2.7 / Metal 3.2, Xcode 26 emits 2.8 / 4.0. Pinning one release's numbers
+  # here made this gate fail on every toolchain except the author's. Ask the
+  # toolchain what it emits, then assert the metallib carries exactly that --
+  # which is the drift this test actually exists to catch.
+  local probe_ll="$WORKDIR/${label}.probe.ll"
+  DEVELOPER_DIR="$developer_dir" xcrun metal -x metal -S -emit-llvm "$SOURCE_METAL" \
+      -o "$probe_ll" >/dev/null 2>&1 || true
+  local expect_air expect_lang
+  expect_air="$(sed -n 's/.*= !{i32 \([0-9]*\), i32 \([0-9]*\), i32 0}.*/\1.\2/p' "$probe_ll" 2>/dev/null | head -1)"
+  expect_lang="$(sed -n 's/.*!"Metal", i32 \([0-9]*\), i32 \([0-9]*\), i32 0}.*/\1.\2/p' "$probe_ll" 2>/dev/null | head -1)"
+  if [[ -z "$expect_air" || -z "$expect_lang" ]]; then
+    echo "FAIL: ${label} could not determine the toolchain's AIR/MSL dialect"
+    exit 1
+  fi
+
   local check
   for check in \
       "^Magic: MTLB" \
       "^Function count: 1$" \
       "\\[kernel 0\\] vector_add" \
-      "air.version=2.8" \
-      "language.version=4.0"; do
+      "air.version=${expect_air}" \
+      "language.version=${expect_lang}"; do
     if ! rg -q "$check" "$out_txt"; then
       echo "FAIL: ${label} failed ABI invariant check: ${check}"
       echo "      toolchain: $(metal_version_for "$developer_dir")"

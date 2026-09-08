@@ -1,3 +1,4 @@
+#include "cumetal/common/air_toolchain.h"
 #include "cumetal/ptx/lower_to_llvm.h"
 
 #include "cumetal/passes/phase1_pipeline.h"
@@ -1444,12 +1445,35 @@ class GenericLlvmEmitter {
         return tmp;
     }
 
+    // Registers whose f64 value came verbatim from widening an f32, mapped to
+    // that original f32 SSA value.
+    //
+    // Widening f32->f64 is exact and narrowing back round-to-nearest returns the
+    // input bit-for-bit, so cvt.rn.f32.f64(cvt.f64.f32(x)) is the identity. Under
+    // software FP64 that round trip is not free: it is two emulated library calls
+    // for a value that never needed to be a double. Recognising the pair deletes
+    // both. Sound by construction -- no rounding is skipped, because none of it
+    // was reachable.
+    //
+    // Scope is one basic block: cleared at every branch, label and call, so a
+    // value redefined on another path can never be forwarded across the join.
+    std::unordered_map<std::string, std::string> f64_widened_from_f32_;
+
+    void invalidate_widened_f32_tracking() { f64_widened_from_f32_.clear(); }
+
+    void forget_widened_f32(const std::string& reg) {
+        if (!f64_widened_from_f32_.empty()) {
+            f64_widened_from_f32_.erase(reg);
+        }
+    }
+
     bool emit_store_reg_bits(std::ostringstream& os,
                              const std::string& reg,
                              int bits_hint,
                              std::string value,
                              int value_bits,
                              bool sign_extend = false) {
+        forget_widened_f32(reg);
         RegSlot& slot = ensure_reg_slot(reg, bits_hint);
         if (value_bits <= 0) {
             value_bits = slot.bits;
@@ -3585,11 +3609,34 @@ class GenericLlvmEmitter {
             auto c = decode_float_operand(os, instr.operands[3], bits);
             if (!a || !b || !c) return fail(instr, "mad/fma float source unsupported");
 
-            const std::string mul = next_tmp("fmul");
-            const std::string add = next_tmp("fadd");
-            os << "  " << mul << " = fmul " << llvm_float_type(bits) << " " << a->ir << ", " << b->ir << "\n";
-            os << "  " << add << " = fadd " << llvm_float_type(bits) << " " << mul << ", " << c->ir << "\n";
-            Value v{.ir = add, .type = {.kind = PtxTypeSpec::Kind::kFloat, .bits = bits}, .bits = bits};
+            // PTX defines fma.rn as a FUSED multiply-add: one rounding, not two.
+            // Lowering it to fmul + fadd (no contraction flags, so nothing refuses
+            // them later) rounds twice -- slower, less accurate, and bit-divergent
+            // from CUDA on the most common path in any GEMM or reduction. mad keeps
+            // the unfused form, which PTX permits for it.
+            const bool fused = instr.opcode.rfind("fma", 0) == 0;
+            std::string result_ir;
+            if (fused) {
+                const std::string fty = llvm_float_type(bits);
+                // The intrinsic is mangled by TYPE SUFFIX (llvm.fma.f32), not by IR
+                // type name (llvm.fma.float). The latter is not an intrinsic at all --
+                // it declares an ordinary external that nothing defines.
+                const std::string mangled = "f" + std::to_string(bits);
+                const std::string fma_tmp = next_tmp("llvm_fma");
+                declarations_.insert("declare " + fty + " @llvm.fma." + mangled + "(" +
+                                     fty + ", " + fty + ", " + fty + ")");
+                os << "  " << fma_tmp << " = call " << fty << " @llvm.fma." << mangled
+                   << "(" << fty << " " << a->ir << ", " << fty << " " << b->ir
+                   << ", " << fty << " " << c->ir << ")\n";
+                result_ir = fma_tmp;
+            } else {
+                const std::string mul = next_tmp("fmul");
+                const std::string add = next_tmp("fadd");
+                os << "  " << mul << " = fmul " << llvm_float_type(bits) << " " << a->ir << ", " << b->ir << "\n";
+                os << "  " << add << " = fadd " << llvm_float_type(bits) << " " << mul << ", " << c->ir << "\n";
+                result_ir = add;
+            }
+            Value v{.ir = result_ir, .type = {.kind = PtxTypeSpec::Kind::kFloat, .bits = bits}, .bits = bits};
             auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(dst).bits);
             if (!bitsv) return fail(instr, "mad/fma float encode failed");
             return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
@@ -3876,8 +3923,14 @@ class GenericLlvmEmitter {
                 const std::string converted = next_tmp("vf64_from_float");
                 os << "  " << converted << " = call i64 @" << function << "("
                    << llvm_int_type(cvt.src.bits) << " " << raw << ")\n";
-                return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits,
-                                           converted, 64);
+                if (!emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits,
+                                         converted, 64)) {
+                    return false;
+                }
+                if (cvt.src.bits == 32) {
+                    f64_widened_from_f32_[dst] = value->ir;
+                }
+                return true;
             }
             if (cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64 &&
                 cvt.src.kind == PtxTypeSpec::Kind::kInt &&
@@ -3900,6 +3953,21 @@ class GenericLlvmEmitter {
             if (cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 64 &&
                 cvt.dst.kind == PtxTypeSpec::Kind::kFloat &&
                 (cvt.dst.bits == 16 || cvt.dst.bits == 32)) {
+                // Round trip elimination: this f64 came straight from widening an
+                // f32 and nothing has redefined it, so narrowing back with
+                // round-to-nearest reproduces that f32 exactly. Forward the
+                // original and drop both emulated conversions. Only round-to-
+                // nearest qualifies -- a directed rounding mode is a real request.
+                if (cvt.dst.bits == 32 && rounding == 0 && is_register_name(src)) {
+                    const auto tracked = f64_widened_from_f32_.find(src);
+                    if (tracked != f64_widened_from_f32_.end()) {
+                        const std::string bits32 = next_tmp("f32_roundtrip");
+                        os << "  " << bits32 << " = bitcast float " << tracked->second
+                           << " to i32\n";
+                        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits,
+                                                   bits32, 32);
+                    }
+                }
                 auto raw = decode_fp64_raw_bits(os, src);
                 if (!raw) return fail(instr, "VF64-to-float conversion source unsupported");
                 const std::string function = cvt.dst.bits == 16
@@ -5576,17 +5644,25 @@ class GenericLlvmEmitter {
             const std::string matrix_shape = "<2 x i64> <i64 8, i64 8>";
             const std::string matrix_stride = "<2 x i64> <i64 1, i64 8>";
             const std::string matrix_origin = "<2 x i64> zeroinitializer";
+            // Same intrinsic, two ABIs -- see AirDialect::simdgroup_matrix_wide_abi().
+            const bool wide_sgm =
+                cumetal::common::detected_air_dialect().simdgroup_matrix_wide_abi();
+            const std::string sgm_params =
+                wide_sgm ? "<2 x i64>, <2 x i64>, <2 x i64>" : "i64, <2 x i64>, i1";
+            const std::string sgm_args =
+                wide_sgm ? (matrix_shape + ", " + matrix_stride + ", " + matrix_origin)
+                         : ("i64 8, " + matrix_origin + ", i1 false");
             const std::string input_type = bf16_inputs ? "bfloat" : "float";
             const std::string input_vector = bf16_inputs ? "v64bf16" : "v64f32";
             declarations_.insert(
                 "declare <64 x " + input_type + "> "
                 "@air.simdgroup_matrix_8x8_load." + input_vector + ".p3" +
                 (bf16_inputs ? "bf16" : "f32") + "(" + input_type +
-                " addrspace(3)*, <2 x i64>, <2 x i64>, <2 x i64>)");
+                " addrspace(3)*, " + sgm_params + ")");
             declarations_.insert(
                 "declare <64 x float> "
                 "@air.simdgroup_matrix_8x8_load.v64f32.p3f32("
-                "float addrspace(3)*, <2 x i64>, <2 x i64>, <2 x i64>)");
+                "float addrspace(3)*, " + sgm_params + ")");
             const std::string mma_suffix = bf16_inputs
                 ? "v64f32.v64bf16.v64bf16.v64f32"
                 : "v64f32.v64f32.v64f32.v64f32";
@@ -5597,8 +5673,7 @@ class GenericLlvmEmitter {
                 ">, <64 x float>)");
             declarations_.insert(
                 "declare void @air.simdgroup_matrix_8x8_store.v64f32.p3f32("
-                "<64 x float>, float addrspace(3)*, <2 x i64>, <2 x i64>, "
-                "<2 x i64>)");
+                "<64 x float>, float addrspace(3)*, " + sgm_params + ")");
 
             const std::string a_matrix = next_tmp("wmma_a_matrix");
             const std::string b_matrix = next_tmp("wmma_b_matrix");
@@ -5607,17 +5682,14 @@ class GenericLlvmEmitter {
             os << "  " << a_matrix << " = call fast <64 x " << input_type << "> "
                << "@air.simdgroup_matrix_8x8_load." << input_vector << ".p3"
                << (bf16_inputs ? "bf16" : "f32") << "("
-               << input_type << " addrspace(3)* " << a << ", " << matrix_shape << ", "
-               << matrix_stride << ", " << matrix_origin << ")\n"
+               << input_type << " addrspace(3)* " << a << ", " << sgm_args << ")\n"
                << "  " << b_matrix << " = call fast <64 x " << input_type << "> "
                << "@air.simdgroup_matrix_8x8_load." << input_vector << ".p3"
                << (bf16_inputs ? "bf16" : "f32") << "("
-               << input_type << " addrspace(3)* " << b << ", " << matrix_shape << ", "
-               << matrix_stride << ", " << matrix_origin << ")\n"
+               << input_type << " addrspace(3)* " << b << ", " << sgm_args << ")\n"
                << "  " << c_matrix << " = call fast <64 x float> "
                << "@air.simdgroup_matrix_8x8_load.v64f32.p3f32("
-               << "float addrspace(3)* " << destination << ", " << matrix_shape
-               << ", " << matrix_stride << ", " << matrix_origin << ")\n"
+               << "float addrspace(3)* " << destination << ", " << sgm_args << ")\n"
                << "  " << d_matrix << " = call fast <64 x float> "
                << "@air.simdgroup_matrix_8x8_multiply_accumulate."
                << mma_suffix << "(<64 x " << input_type << "> " << a_matrix
@@ -5626,8 +5698,7 @@ class GenericLlvmEmitter {
                << ")\n"
                << "  call void @air.simdgroup_matrix_8x8_store.v64f32.p3f32("
                << "<64 x float> " << d_matrix << ", float addrspace(3)* "
-               << destination << ", " << matrix_shape << ", " << matrix_stride
-               << ", " << matrix_origin << ")\n";
+               << destination << ", " << sgm_args << ")\n";
             return true;
         }
 
@@ -8645,6 +8716,21 @@ class GenericLlvmEmitter {
                                 bool* out_terminated) {
         *out_terminated = false;
 
+        // Anything that starts a new basic block, leaves this one, or can clobber
+        // state through a callee ends the window in which a widened f32 may be
+        // forwarded. Conservative: the optimisation is worth nothing next to a
+        // wrong value forwarded across a join.
+        {
+            const std::string block_root = opcode_root(instr.opcode);
+            if (block_root == "bra" || block_root == "brx" || block_root == "ret" ||
+                block_root == "exit" || block_root == "call" ||
+                instr.opcode.rfind("ptx.label", 0) == 0 ||
+                instr.opcode.rfind("ptx.branchtargets", 0) == 0 ||
+                !instr.predicate.empty()) {
+                invalidate_widened_f32_tracking();
+            }
+        }
+
         // Refuse rather than silently reading zero for a special register we do
         // not lower. Probe with 32 bits into a scratch stream: the handled ones
         // are pure reads, so discarding the emitted IR here is safe.
@@ -8670,6 +8756,7 @@ class GenericLlvmEmitter {
             return true;
         }
         if (root == "bra") {
+            invalidate_widened_f32_tracking();
             return emit_branch(os, instr, exec_pos, out_terminated);
         }
         if (root == "brx") {
@@ -9428,14 +9515,14 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
     //
     // Deleting them costs nothing: the generic path lowers all of it. Caught by ptx_sweep_numeric.
     //
-    int air_major = 2;
-    int air_minor = 8;
+    int air_major = cumetal::common::detected_air_dialect().air_major;
+    int air_minor = cumetal::common::detected_air_dialect().air_minor;
     if (const auto it = fields.find("air.version"); it != fields.end()) {
         (void)parse_major_minor(it->second, &air_major, &air_minor);
     }
 
-    int language_major = 4;
-    int language_minor = 0;
+    int language_major = cumetal::common::detected_air_dialect().language_major;
+    int language_minor = cumetal::common::detected_air_dialect().language_minor;
     if (const auto it = fields.find("language.version"); it != fields.end()) {
         (void)parse_major_minor(it->second, &language_major, &language_minor);
     }

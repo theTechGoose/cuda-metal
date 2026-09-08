@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cumetal/common/air_toolchain.h"
+
 #include "cumetal/ptx/parser.h"
 
 #include <string>
@@ -18,8 +20,11 @@ struct KernelMetadata {
 };
 
 struct MetadataOptions {
-    std::string air_version = "2.8";
-    std::string language_version = "4.0";
+    // Default to the dialect the installed Metal toolchain accepts; an explicit
+    // value still wins. See cumetal::common::detected_air_dialect().
+    std::string air_version = cumetal::common::detected_air_dialect().air_version_string();
+    std::string language_version =
+        cumetal::common::detected_air_dialect().language_version_string();
 };
 
 KernelMetadata build_kernel_metadata(const cumetal::ptx::EntryFunction& entry,

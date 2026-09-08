@@ -1259,7 +1259,10 @@ int main(int argc, char** argv) {
     bool positional_input_set = false;
     std::string ptx_entry_name;
     bool ptx_strict = false;
-    cumetal::ptx::Fp64Mode ptx_fp64_mode = cumetal::ptx::Fp64Mode::kNative;
+    // Default to a mode that actually runs. This used to be kNative for every
+    // input kind, with .cu patched to kEmulate further down -- so `cumetalc
+    // foo.ptx` silently produced a binary that died at pipeline creation.
+    cumetal::ptx::Fp64Mode ptx_fp64_mode = cumetal::ptx::Fp64Mode::kWide48;
     bool fp64_mode_set_explicitly = false;
     bool needs_vf64_support = false;
     bool cuda_device_frontend = false;
@@ -1521,13 +1524,24 @@ int main(int argc, char** argv) {
     if (!backend_set_explicitly && lower_ext(options.input) == ".cu" && !cuda_device_frontend) {
         backend = BackendKind::kCumetalIr;
     }
-    // Direct source compilation selects the typed backend by default, so give
-    // it the same usable software-FP64 default as runtime/JIT registration.
-    // PTX/offline compatibility retains the historical native default, and an
-    // explicit --fp64 policy always wins.
-    if (!fp64_mode_set_explicitly && backend == BackendKind::kCumetalIr &&
-        lower_ext(options.input) == ".cu" && !cuda_device_frontend) {
-        ptx_fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
+    // Every input kind now shares the runnable default set above; an explicit
+    // --fp64 policy always wins.
+
+    // native/warn emit true IEEE-754 doubles. `xcrun metal` compiles them
+    // happily and air-lld links them; the GPU only rejects them when Metal
+    // builds a pipeline state, because Apple Silicon has no FP64 ALU. Without
+    // this note the user gets a valid-looking binary that dies at first launch
+    // with nothing pointing back at the mode they selected.
+    if (ptx_fp64_mode == cumetal::ptx::Fp64Mode::kNative ||
+        ptx_fp64_mode == cumetal::ptx::Fp64Mode::kWarn) {
+        std::cerr << "cumetalc: warning: --fp64="
+                  << cumetal::ptx::fp64_mode_name(ptx_fp64_mode)
+                  << " emits true IEEE-754 doubles, which current Apple Silicon cannot "
+                     "execute; any kernel containing .f64 will fail at pipeline creation. "
+                     "Use --fp64=wide48 (full binary64 range) or --fp64=ieee64 (correctly "
+                     "rounded) to produce runnable code."
+                  << (fp64_mode_set_explicitly ? "\n" : " [this is the default for this input "
+                                                         "kind; pass --fp64 to choose]\n");
     }
 
     // `cumetalc foo.cu -o foo` builds an executable. Infer that from the shape of the request --

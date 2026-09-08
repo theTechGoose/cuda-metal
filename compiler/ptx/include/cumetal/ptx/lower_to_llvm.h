@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cumetal/common/air_toolchain.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -19,18 +21,83 @@ enum class Fp64Mode {
     kWarn,     // same as kNative but emit a per-instruction warning for .f64 ops
 };
 
-// Runtime/driver/registration default: emulate unless CUMETAL_FP64_MODE=native|warn.
+// Runtime/driver/registration default: fast48 emulation unless CUMETAL_FP64_MODE
+// selects otherwise. Accepts native|emulate|fast48|wide48|ieee64|warn.
 inline Fp64Mode fp64_mode_from_env() {
     const char* env = std::getenv("CUMETAL_FP64_MODE");
     if (env != nullptr) {
-        const std::string_view mode(env);
+        // Only the leading clause is the global policy: the value may carry
+        // per-kernel overrides after it (see fp64_mode_for_kernel). Comparing the
+        // whole string silently ignored the global clause of any per-kernel
+        // setting and fell through to the default.
+        std::string_view mode(env);
+        const std::size_t clause_end = mode.find(';');
+        if (clause_end != std::string_view::npos) {
+            mode = mode.substr(0, clause_end);
+        }
         if (mode == "native") return Fp64Mode::kNative;
         if (mode == "emulate" || mode == "fast48") return Fp64Mode::kEmulate;
         if (mode == "wide48") return Fp64Mode::kWide48;
         if (mode == "ieee64") return Fp64Mode::kIEEE64;
         if (mode == "warn") return Fp64Mode::kWarn;
     }
-    return Fp64Mode::kEmulate;
+    // wide48 over fast48: both carry a ~48-bit significand, but fast48 keeps
+    // binary32's exponent range, so a value that is fine in CUDA silently
+    // becomes inf past ~1e38. Silent wrong answers cost more than the extra
+    // scaling work; CUMETAL_FP64_MODE=fast48 opts back into the faster mode.
+    return Fp64Mode::kWide48;
+}
+
+// Per-kernel FP64 policy.
+//
+// One global mode forces a whole-program tradeoff that most workloads do not
+// want: docs/physx-feasibility.md describes six robust geometric products and
+// one plane distance needing precision inside an otherwise fp32 simulation.
+// Measured, ieee64 is bit-exact (0 ULP) at ~1.43x fast48, so buying exactness
+// for a handful of kernels costs almost nothing overall -- but only if it can be
+// bought per kernel.
+//
+//   CUMETAL_FP64_MODE=wide48                        -- global, as before
+//   CUMETAL_FP64_MODE=fast48;_Z6probePd=ieee64      -- default plus overrides
+//
+// Names are matched against the mangled kernel symbol, by exact match first and
+// then as a substring, so an unmangled source name usually works too.
+inline Fp64Mode fp64_mode_for_kernel(std::string_view kernel_name) {
+    const char* env = std::getenv("CUMETAL_FP64_MODE");
+    if (env == nullptr || kernel_name.empty()) {
+        return fp64_mode_from_env();
+    }
+    std::string_view rest(env);
+    Fp64Mode chosen = fp64_mode_from_env();
+    bool exact_hit = false;
+    while (!rest.empty()) {
+        const std::size_t end = rest.find(';');
+        std::string_view clause = rest.substr(0, end);
+        rest = (end == std::string_view::npos) ? std::string_view{} : rest.substr(end + 1);
+        const std::size_t eq = clause.find('=');
+        if (eq == std::string_view::npos) {
+            continue;  // the bare default clause; already handled above
+        }
+        const std::string_view pattern = clause.substr(0, eq);
+        const std::string_view mode_text = clause.substr(eq + 1);
+        if (pattern.empty() || mode_text.empty()) {
+            continue;
+        }
+        Fp64Mode parsed;
+        if (mode_text == "native") parsed = Fp64Mode::kNative;
+        else if (mode_text == "emulate" || mode_text == "fast48") parsed = Fp64Mode::kEmulate;
+        else if (mode_text == "wide48") parsed = Fp64Mode::kWide48;
+        else if (mode_text == "ieee64") parsed = Fp64Mode::kIEEE64;
+        else if (mode_text == "warn") parsed = Fp64Mode::kWarn;
+        else continue;
+        if (pattern == kernel_name) {
+            return parsed;  // exact match is decisive
+        }
+        if (!exact_hit && kernel_name.find(pattern) != std::string_view::npos) {
+            chosen = parsed;  // substring match; keep looking for an exact one
+        }
+    }
+    return chosen;
 }
 
 inline std::string_view fp64_mode_name(Fp64Mode mode) {
@@ -53,7 +120,7 @@ struct LowerToLlvmOptions {
     bool strict = false;
     std::string entry_name;
     std::string module_id = "cumetal.ptx.module";
-    std::string target_triple = "air64_v28-apple-macosx26.0.0";
+    std::string target_triple = cumetal::common::detected_air_dialect().target_triple;
     // Offline cumetalc PTX tools still default to native; runtime JIT overrides via
     // fp64_mode_from_env().
     Fp64Mode fp64_mode = Fp64Mode::kNative;

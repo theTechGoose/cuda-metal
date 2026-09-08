@@ -1,3 +1,4 @@
+#include "cumetal/common/air_toolchain.h"
 #include "cumetal/ptx/lower_to_llvm.h"
 
 #include <cstdint>
@@ -118,7 +119,9 @@ int main() {
     if (!expect(contains(lowered.llvm_ir, "\"air.kernel\""), "air.kernel attribute emitted")) {
         return 1;
     }
-    if (!expect(contains(lowered.llvm_ir, "\"air.version\"=\"2.8\""), "air.version emitted")) {
+    const std::string expected_air_attr =
+        "\"air.version\"=\"" + cumetal::common::detected_air_dialect().air_version_string() + "\"";
+    if (!expect(contains(lowered.llvm_ir, expected_air_attr), "air.version emitted")) {
         return 1;
     }
     if (!expect(contains(lowered.llvm_ir, "!llvm.module.flags") &&
@@ -2102,8 +2105,7 @@ $L_done:
     }
     if (!expect(contains(packed_half_lowered.llvm_ir, "fadd <2 x half>") &&
                 contains(packed_half_lowered.llvm_ir, "fmul <2 x half>") &&
-                contains(packed_half_lowered.llvm_ir, "fmul half") &&
-                contains(packed_half_lowered.llvm_ir, "fadd half"),
+                contains(packed_half_lowered.llvm_ir, "@llvm.fma.f16(half"),
                 "packed and scalar half arithmetic preserve their lanes")) {
         return 1;
     }

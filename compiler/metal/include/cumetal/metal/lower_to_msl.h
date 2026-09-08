@@ -33,7 +33,7 @@ struct PtxToMslOptions {
     bool strict = true;
     std::string entry_name;
     std::string source_name;
-    std::string fp64_mode = "fast48";
+    std::string fp64_mode = "wide48";
 };
 
 struct PtxToMslResult {
@@ -56,6 +56,6 @@ using NvvmToMslResult = PtxToMslResult;
     std::string_view ptx, const PtxToMslOptions& options = {});
 [[nodiscard]] NvvmToMslResult compile_nvvm_to_msl(
     std::string_view llvm_ir, std::string_view source_name = {},
-    std::string_view entry_name = {}, std::string_view fp64_mode = "fast48");
+    std::string_view entry_name = {}, std::string_view fp64_mode = "wide48");
 
 }  // namespace cumetal::metal

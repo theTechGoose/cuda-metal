@@ -32,3 +32,4 @@ a.out
 
 # Matmul demo binaries and measurement logs
 demos/matmul/out/
+/dist/

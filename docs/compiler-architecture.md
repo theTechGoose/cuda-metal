@@ -76,7 +76,7 @@ cumetalc kernel.cu --emit=exe        -o kernel
 | `--cuda-device` | Ask a CUDA-capable Clang to produce PTX before CuMetal lowering. |
 | `--entry NAME` | Compile one kernel and its reachable device-call closure. |
 | `--ptx-strict` | Reject unsupported PTX rather than tolerating it. |
-| `--fp64=fast48\|wide48\|ieee64\|native\|emulate\|warn` | Select the virtual FP64 policy; direct typed `.cu` compilation and runtime/JIT default to `fast48` (`emulate` alias), while offline PTX compatibility retains `native`. |
+| `--fp64=fast48\|wide48\|ieee64\|native\|emulate\|warn` | Select the virtual FP64 policy. Every input kind and runtime/JIT default to `wide48`: it matches `fast48`'s ~48-bit significand but keeps full binary64 range, so a value that is finite in CUDA does not silently become `inf` near 1e38. `fast48` trades that range back for speed; `ieee64` is correctly rounded; `native` emits true doubles and fails at pipeline creation on current Apple GPUs. |
 | `--save-temps` | Retain link intermediates. |
 
 The default follows measured production-metallib compilation coverage rather

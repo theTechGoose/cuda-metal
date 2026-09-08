@@ -975,7 +975,7 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     // cache reports the same provenance as a cold one. Only the LLVM path can
     // lower FP64 (the direct-MSL lowering declines it), so this is the single
     // place that needs to know.
-    const auto fp64_mode = cumetal::ptx::fp64_mode_from_env();
+    const auto fp64_mode = cumetal::ptx::fp64_mode_for_kernel(kernel_name);
     const bool uses_fp64 = ptx_source.find(".f64") != std::string::npos;
     const char* generic_ptx_provenance = "generic_ptx_lowering";
     if (uses_fp64 && fp64_mode == cumetal::ptx::Fp64Mode::kEmulate) {
@@ -1210,15 +1210,25 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         cumetal::ptx::LowerToLlvmOptions lower_options;
         lower_options.entry_name = kernel_name;
         lower_options.strict = true;
-        lower_options.fp64_mode = cumetal::ptx::fp64_mode_from_env();
-        if (lower_options.fp64_mode == cumetal::ptx::Fp64Mode::kEmulate &&
+        lower_options.fp64_mode = cumetal::ptx::fp64_mode_for_kernel(kernel_name);
+        // Both emulated modes carry a ~48-bit significand, so numerically sensitive
+        // code needs to know which one is in effect. fast48 additionally clamps the
+        // exponent to binary32's range, which is the failure that bites silently.
+        if ((lower_options.fp64_mode == cumetal::ptx::Fp64Mode::kEmulate ||
+             lower_options.fp64_mode == cumetal::ptx::Fp64Mode::kWide48) &&
             ptx_source.find(".f64") != std::string::npos) {
+            const bool fast48 = lower_options.fp64_mode == cumetal::ptx::Fp64Mode::kEmulate;
             cumetal::warn_once(
-                "fp64-emulate",
-                "kernel uses FP64 (double) instructions, emulated with Dekker FP32-pair "
-                "arithmetic (~48-bit significand with binary32 exponent range, not full "
-                "IEEE-754 double); results lose precision. Set CUMETAL_FP64_MODE=native to "
-                "compile true doubles (fails at launch on current Apple Silicon)");
+                fast48 ? "fp64-fast48" : "fp64-wide48",
+                fast48
+                    ? "kernel uses FP64 (double) instructions, emulated with Dekker FP32-pair "
+                      "arithmetic (~48-bit significand with binary32 exponent range, so values "
+                      "overflow near 1e38 instead of 1e308). Set CUMETAL_FP64_MODE=wide48 for "
+                      "full binary64 range, or =ieee64 for correctly rounded binary64"
+                    : "kernel uses FP64 (double) instructions, emulated with scaled FP32-pair "
+                      "arithmetic (~48-bit significand, full binary64 range). Results are close "
+                      "to but not bit-identical to IEEE-754 double; set CUMETAL_FP64_MODE=ieee64 "
+                      "for correctly rounded binary64, or =fast48 to trade range for speed");
         }
         const auto lowered = cumetal::ptx::lower_ptx_to_llvm_ir(ptx_source, lower_options);
         if (!lowered.ok || lowered.llvm_ir.empty()) {

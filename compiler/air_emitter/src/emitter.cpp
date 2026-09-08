@@ -1,3 +1,4 @@
+#include "cumetal/common/air_toolchain.h"
 #include "cumetal/air_emitter/emitter.h"
 
 #include "cumetal/air_validate/validator.h"
@@ -287,7 +288,7 @@ std::vector<KernelInput> parse_kernels_from_llvm_ir(const std::vector<std::uint8
     if (decls.empty()) {
         kernels.push_back({.name = fallback_name,
                            .metadata = {{.key = "air.kernel", .value = "true"},
-                                        {.key = "air.version", .value = "2.6"}}});
+                                        {.key = "air.version", .value = cumetal::common::kExperimentalContainerAirVersion}}});
     } else {
         for (const auto& decl : decls) {
             KernelInput kernel;
@@ -316,7 +317,7 @@ std::vector<KernelInput> parse_kernels_from_llvm_ir(const std::vector<std::uint8
                 }
             }
             if (!has_air_version) {
-                kernel.metadata.push_back({.key = "air.version", .value = "2.6"});
+                kernel.metadata.push_back({.key = "air.version", .value = cumetal::common::kExperimentalContainerAirVersion});
                 if (logs != nullptr) {
                     logs->push_back("LLVM IR missing explicit air.version on " + kernel.name +
                                     "; defaulting to 2.6 for experimental container");
@@ -430,7 +431,7 @@ EmitResult emit_experimental(const EmitOptions& options) {
     } else {
         kernels.push_back({.name = options.kernel_name,
                            .metadata = {{.key = "air.kernel", .value = "true"},
-                                        {.key = "air.version", .value = "2.6"},
+                                        {.key = "air.version", .value = cumetal::common::kExperimentalContainerAirVersion},
                                         {.key = "bitcode.encoding", .value = ext.empty() ? "raw" : ext}}});
     }
 

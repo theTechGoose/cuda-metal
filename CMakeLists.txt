@@ -65,6 +65,7 @@ if(CUMETAL_ENABLE_BINARY_SHIM AND NOT CUMETAL_ENABLE_CUDA_REGISTRATION)
 endif()
 
 add_library(cumetal_common STATIC
+    compiler/common/src/air_toolchain.cpp
     compiler/common/src/metallib.cpp
 )
 
@@ -87,6 +88,13 @@ add_library(cumetal_ptx STATIC
 target_include_directories(cumetal_ptx
     PUBLIC
         compiler/ptx/include
+)
+
+# The AIR/MSL dialect defaults come from the installed Metal toolchain; that
+# probe lives in cumetal_common.
+target_link_libraries(cumetal_ptx
+    PUBLIC
+        cumetal_common
 )
 
 target_compile_options(cumetal_ptx
@@ -614,6 +622,7 @@ if(CUMETAL_BUILD_TESTS)
     add_subdirectory(tests/air_abi)
     add_subdirectory(tests/conformance)
     add_subdirectory(tests/functional)
+    add_subdirectory(tests/fp64_ulp)
     add_subdirectory(tests/cuda_projects)
     add_subdirectory(tests/ptx_sweep)
     add_subdirectory(tests/unit)
@@ -647,6 +656,7 @@ if(CUMETAL_BUILD_TESTS)
         "${CMAKE_SOURCE_DIR}/tests/air_abi"
         "${CMAKE_SOURCE_DIR}/tests/conformance"
         "${CMAKE_SOURCE_DIR}/tests/functional"
+        "${CMAKE_SOURCE_DIR}/tests/fp64_ulp"
         "${CMAKE_SOURCE_DIR}/tests/cuda_projects"
         "${CMAKE_SOURCE_DIR}/tests/ptx_sweep"
         "${CMAKE_SOURCE_DIR}/tests/unit"

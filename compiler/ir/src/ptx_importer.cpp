@@ -3341,7 +3341,7 @@ InlineAsmResult lower_inline_ptx_asm(const InlineAsmRequest& request, Builder* b
     importer.builder = *builder;
     importer.result.module.source_name = request.source_name;
     importer.result.module.attributes["fp64_mode"] =
-        request.fp64_mode.empty() ? std::string("fast48") : request.fp64_mode;
+        request.fp64_mode.empty() ? std::string("wide48") : request.fp64_mode;
     importer.entry = &entry;
     importer.is_kernel = false;
 

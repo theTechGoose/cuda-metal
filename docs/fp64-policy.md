@@ -19,8 +19,8 @@ the same names through `CUMETAL_FP64_MODE=MODE`.
 
 | Mode | Contract | Range | Current role |
 | --- | --- | --- | --- |
-| `fast48` | FP32-pair arithmetic, approximately 48 significand bits | binary32 exponent envelope | Runtime default; `emulate` is a compatibility alias |
-| `wide48` | Scaled FP32-pair arithmetic, approximately 48 significand bits | binary64 range, including subnormals and specials | Reduced-precision wide-range mode |
+| `fast48` | FP32-pair arithmetic, approximately 48 significand bits | binary32 exponent envelope | Opt-in speed mode; `emulate` is a compatibility alias. Values overflow near 1e38 |
+| `wide48` | Scaled FP32-pair arithmetic, approximately 48 significand bits | binary64 range, including subnormals and specials | **Default** for every input kind and for runtime/JIT |
 | `ieee64` | Correctly rounded binary64 core arithmetic and conversions | Full binary64 | Exact software mode |
 | `native` | Native AIR binary64 operations | Full binary64 if supported | Expected to fail pipeline creation on current Apple GPUs |
 | `warn` | Same code generation as `native`, with FP64 diagnostics | Same as `native` | Audit mode |

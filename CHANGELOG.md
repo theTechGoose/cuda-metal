@@ -6,7 +6,71 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The AIR/MSL dialect is now detected from the installed Metal toolchain.** It used to be
+  hardcoded in four places across three files (AIR 2.8, MSL 4.0, `air64_v28`, `macosx26.0.0`),
+  which is Xcode 26 only. On Xcode 16.4 that failed twice, in two different places, for two
+  different reasons: `air-lld` refused to link (`air version set to 2.8.0 ... but expecting
+  2.7`) and, when that was worked around, the runtime refused to load the metallib
+  (`language version 4.0 which is not supported on this OS`). The second failure happened
+  after a clean compile and link, so kernels silently never ran and their output buffers
+  stayed zeroed -- which reads downstream as wrong numerical results rather than a version
+  problem. `cumetal::common::detected_air_dialect()` now compiles a trivial kernel with the
+  installed compiler and reads back the dialect it emits. Every version constant lives in
+  `compiler/common/include/cumetal/common/air_toolchain.h`; `CUMETAL_AIR_DIALECT=<air>/<msl>`
+  overrides it, and a failed probe falls back conservatively with a diagnostic instead of
+  guessing silently.
+- **Per-kernel FP64 policy.** `CUMETAL_FP64_MODE=wide48;solve=ieee64` sets a global mode plus
+  per-kernel overrides, matched against the mangled symbol by exact name then by substring.
+  One global mode forced a whole-program tradeoff; measured, `ieee64` is bit-exact at ~1.43x
+  `fast48`, so buying exactness for the few kernels that need it costs almost nothing overall.
+- **FP64 accuracy gates (`tests/fp64_ulp`).** Each policy is compared against hardware
+  binary64 and its worst-case drift reported in ULPs. `ieee64` is gated at a budget of **0**:
+  it claims correctly rounded binary64, and that claim is either true or it is not.
+- **`deploy.sh`** builds, gates, packages and releases from `main`. It runs directly on macOS
+  and delegates through a host bridge when run from a container, with the release build itself
+  in `scripts/mac_release_build.sh`, which knows nothing about how it was invoked.
+
+### Changed
+
+- **The default FP64 policy is `wide48`, was `fast48`.** Both carry a ~48-bit significand, but
+  `fast48` keeps binary32's exponent range, so a value that is finite in CUDA silently becomes
+  `inf` past ~1e38. Measured cost of the change is 17% on a division-heavy compute-bound
+  kernel; silent overflow is not worth 17%. `CUMETAL_FP64_MODE=fast48` opts back in.
+- **No input kind defaults to unrunnable output any more.** `cumetalc` defaulted to `native`
+  for every input and patched `.cu` back to a working mode later, so `cumetalc foo.ptx`
+  silently produced a binary that died at pipeline creation. `native` and `warn` remain
+  available and now explain, at compile time, why they will fail on Apple Silicon.
+- **The FP64 emulation warnings name the modes that work.** They previously pointed at
+  `CUMETAL_FP64_MODE=native`, which cannot execute on Apple Silicon, and never mentioned
+  `wide48` or `ieee64`.
+
 ### Fixed
+
+- **`fma.rn.f32` was not fused.** It lowered to a separate `fmul` and `fadd` with no
+  contraction flags, so it rounded twice where PTX mandates one rounding -- slower, less
+  accurate, and bit-divergent from CUDA on the most common path in any GEMM or reduction.
+  Both now lower to `@llvm.fma.f32` / `@llvm.fma.f16`. `mad` keeps the unfused form, which
+  PTX permits for it.
+- **WMMA emitted AIR 2.8's `simdgroup_matrix` signature unconditionally.** The intrinsic has
+  the same name in both dialects but took different argument types before 2.8, so on an older
+  toolchain it failed as `invalid AIR function` -- which reads like a missing feature but is
+  an overload mismatch. The load/store signature now follows the detected dialect.
+- **Three shell harnesses died on macOS's bash 3.2.** Expanding `"${ARR[@]}"` on an empty
+  array under `set -u` is fatal there, and `#!/usr/bin/env bash` resolves to `/bin/bash`.
+  `scripts/ci_report.sh` hit it whenever no extra ctest arguments were passed -- that is, on
+  every release invocation -- and two functional harnesses hit it on their default paths,
+  taking 14 tests down with them.
+- **Two tests pinned one Xcode release's dialect as a universal invariant.**
+  `air_abi_xcode_matrix_regression` asserted `air.version=2.8` against the toolchain's own
+  output, so it failed on every toolchain except the author's; it now derives the expected
+  dialect from the toolchain under test, which is the drift it exists to catch.
+- **Widen/narrow round trips are eliminated.** `cvt.rn.f32.f64(cvt.f64.f32(x))` is the
+  identity -- widening is exact and narrowing back round-to-nearest returns the input
+  bit-for-bit -- but under software FP64 it cost two emulated library calls. Recognised
+  within a basic block and invalidated at every branch, label, call and predicated
+  instruction.
 
 - **Typed PTX vector stores wrote only their first lane.** `st.global.v2.b32 [addr], {%r1, %r2}`
   (Clang's spelling for two adjacent struct fields at `-O2`) stored `%r1` and silently dropped

@@ -41,7 +41,7 @@ done
 LOG="$(mktemp -t cumetal-ctest)"
 trap 'rm -f "${LOG}"' EXIT
 
-ctest --test-dir "${BUILD_DIR}" --output-on-failure "${CTEST_ARGS[@]}" 2>&1 | tee "${LOG}"
+ctest --test-dir "${BUILD_DIR}" --output-on-failure ${CTEST_ARGS[@]+"${CTEST_ARGS[@]}"} 2>&1 | tee "${LOG}"
 CTEST_STATUS="${PIPESTATUS[0]}"
 
 TOTAL=$(grep -cE '^[[:space:]]*[0-9]+/[0-9]+ Test' "${LOG}" || true)
