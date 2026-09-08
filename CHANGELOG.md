@@ -6,6 +6,59 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Contact reporting on the GPU no longer crashes the host: a device-to-host blit into
+  pinned memory now gets the embedded-pointer restore.** A D2H copy whose destination is
+  pinned memory is a Metal blit -- a raw byte copy in the stream's command buffer -- so
+  `restore_embedded_host_pointers()`, which the host-function copy path has always applied,
+  never ran on it. The device addresses embedded in the copied bytes reached the CPU intact.
+  Under `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`, PhysX's GPU narrowphase blits its
+  contact-manager output back to pinned host memory, and any application reading contact
+  points from it -- `PxContactPair::extractContacts()` inside a
+  `PxSimulationEventCallback::onContact` -- dereferenced a GPU virtual address and died with
+  `EXC_BAD_ACCESS` on the first step with a touch (reported against 0.6.0 at
+  `0x1000a09e1b0`). A scene with no contact listener never reads those bytes, which is why
+  0.6.0's own async-copy work did not surface it. The blit cannot restore in place while the
+  GPU may still be writing, so each one is recorded and its restore runs at the next
+  stream, event or device synchronization that covers it -- the point after which the CPU
+  may legitimately read the destination at all.
+- **`cuMemsetD16Async`/`cuMemsetD32Async` are stream-ordered.** They wrote through the host
+  pointer at call time, ignoring the stream, so with the CPU running ahead of the GPU queue
+  a clear landed *before* the still-pending kernels it was meant to follow. PhysX clears its
+  solver, narrowphase and activation buffers with `memsetD32Async` between dependent
+  launches every step, and lost contacts and inherited stale friction from it -- invisible
+  under `CUMETAL_SYNC_EACH_LAUNCH=1`, which serialises everything and hides the ordering.
+  Both are enqueued on the stream timeline now, and the synchronous `cuMemsetD16`/
+  `cuMemsetD32` wait for the device first, as `cudaMemset` does.
+- **A destroyed stream no longer leaves deferred restores behind.** The pending-restore book
+  is keyed by the backend stream's address, which the allocator hands out again;
+  `cudaStreamDestroy` now applies what is due (it synchronizes) and forgets the rest, so a
+  later stream landing on that address cannot inherit them and write through host
+  destinations that may already be freed.
+- **Releases ship all of `runtime/api`.** `include/` was an install list maintained by hand
+  and had drifted to 79 of 105 headers, with none of the extensionless `cuda/std/*` ones.
+  `vector_types.h` and `vector_functions.h` were among the missing, and PhysX's host code
+  includes them (`gpucommon/include/cutil_math.h`), so the 0.6.0 tarball could not build
+  PhysX's GPU runtime against its own `include/`. The headers install as a tree now, and
+  `scripts/mac_release_build.sh` fails the release if a header in the source is not in the
+  staged `include/`.
+
+### Added
+
+- **`scripts/physx-patches/0021-gpu-pipeline-fixes.patch`** -- five fixes to the series' GPU
+  pipeline that a 2 800-body scene (convex-hull chunks collapsing onto a carpet of locked
+  spheres) found, each carrying its evidence in the code comments: PhysX's own per-pair
+  friction correlation restored (0007/0010 reused another pair's anchors); the CPU's
+  static-batch bound follows the one-batch-per-contact layout 0011's serial stage 2 builds;
+  block-contact slots come from the warp maximum again; the DMA-back handshake synchronizes
+  instead of spinning on a pinned flag Metal does not order; and a support-function guard
+  rejects impossible convex contacts after GJK/EPA (a mitigation -- `convexConvexNphase_
+  stage2Kernel` still misjudges some distant new pairs under both backends).
+  `HF_DEBUG_FRICTION=1` prints in the solver and narrowphase cores. `apply_physx_patches.sh`
+  learns a marker for the 0010 hunk this rewrites, so the series no longer tries to re-apply
+  0010 on a tree that already has 0021.
+
 ## [0.6.0] - 2026-09-08
 
 ### Added

@@ -99,6 +99,29 @@ rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 cmake --install "$BUILD_DIR" --prefix "$STAGE_DIR"
 
+# The headers a release ships must be all of runtime/api, with nothing left
+# behind. 0.6.0 shipped 79 of 105 because the install list was an enumeration
+# maintained by hand: vector_types.h and vector_functions.h were among the
+# missing, and PhysX's host code includes them, so that tarball could not build
+# PhysX's GPU runtime against its own include/. The install is a tree now; this
+# gate is what keeps it one -- a header in the source that is not in the stage
+# fails the release rather than reaching a user.
+step "Verify headers"
+STAGE_ABS="$REPO_ROOT/$STAGE_DIR"   # the gate runs from runtime/api; STAGE_DIR is relative
+MISSING_HEADERS="$(
+    cd runtime/api && command find . -type f \
+        | sed 's|^\./||' \
+        | while IFS= read -r header; do
+              [ -f "$STAGE_ABS/include/$header" ] || printf '%s\n' "$header"
+          done
+)"
+if [ -n "$MISSING_HEADERS" ]; then
+    printf 'release: runtime/api headers missing from the staged include/:\n%s\n' \
+        "$MISSING_HEADERS" >&2
+    exit 1
+fi
+echo "  $(cd runtime/api && command find . -type f | wc -l | tr -d ' ') headers staged"
+
 # Sign with a Developer ID when the machine has one. Gatekeeper quarantines an
 # unsigned download, and the fix a user reaches for -- disabling Gatekeeper --
 # is worse than the problem. This is detection, not configuration: the day a

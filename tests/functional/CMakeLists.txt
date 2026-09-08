@@ -224,6 +224,10 @@ add_executable(cumetal_runtime_device_limits_test
     runtime_device_limits_test.cpp
 )
 
+add_executable(cumetal_dtoh_blit_pointer_restore_test
+    dtoh_blit_pointer_restore_test.cpp
+)
+
 add_executable(cumetal_driver_extended_api_test
     driver_extended_api_test.cpp
 )
@@ -855,6 +859,11 @@ target_link_libraries(cumetal_runtime_occupancy_test
 )
 
 target_link_libraries(cumetal_runtime_device_limits_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_dtoh_blit_pointer_restore_test
     PRIVATE
         cumetal_runtime
 )
@@ -1674,6 +1683,13 @@ target_compile_options(cumetal_runtime_occupancy_test
 )
 
 target_compile_options(cumetal_runtime_device_limits_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_dtoh_blit_pointer_restore_test
     PRIVATE
         -Wall
         -Wextra
@@ -2515,6 +2531,11 @@ add_test(
 add_test(
     NAME functional_runtime_device_limits
     COMMAND cumetal_runtime_device_limits_test
+)
+
+add_test(
+    NAME functional_dtoh_blit_pointer_restore
+    COMMAND cumetal_dtoh_blit_pointer_restore_test
 )
 
 add_test(

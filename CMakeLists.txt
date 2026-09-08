@@ -743,125 +743,14 @@ if(APPLE)
     endif()
 endif()
 
-install(FILES
-    runtime/api/cumetal_native.h
-    runtime/api/cublas_v2.h
-    runtime/api/cuda.h
-    runtime/api/cuda_fp16.h
-    runtime/api/cuda_runtime.h
-    runtime/api/cuda_runtime_api.h
-    runtime/api/cufft.h
-    runtime/api/cufftXt.h
-    runtime/api/curand.h
-    runtime/api/cusparse.h
-    runtime/api/cusolver_common.h
-    runtime/api/cusolverDn.h
-    runtime/api/cusolverSp.h
-    runtime/api/cublasLt.h
-    runtime/api/cudnn.h
-    runtime/api/nvml.h
-    runtime/api/nccl.h
-    runtime/api/nvrtc.h
-    runtime/api/nvPTXCompiler.h
-    runtime/api/cooperative_groups.h
-    runtime/api/cuComplex.h
-    runtime/api/device_launch_parameters.h
-    runtime/api/driver_types.h
-    runtime/api/library_types.h
-    runtime/api/channel_descriptor.h
-    runtime/api/device_atomic_functions.h
-    runtime/api/math_functions.h
-    runtime/api/cuda_profiler_api.h
-    runtime/api/cuda_occupancy.h
-    runtime/api/nvToolsExt.h
-    runtime/api/sm_20_intrinsics.h
-    runtime/api/sm_30_intrinsics.h
-    runtime/api/sm_60_intrinsics.h
-    runtime/api/sm_70_intrinsics.h
-    runtime/api/sm_80_intrinsics.h
-    runtime/api/cublas_api.h
-    runtime/api/cuda_pipeline.h
-    runtime/api/cuda_device_runtime_api.h
-    runtime/api/curand_kernel.h
-    runtime/api/cusparse_v2.h
+# The public headers are the whole of runtime/api -- shipped as a tree rather than
+# an enumeration. The enumeration this replaces had drifted: it listed 79 of the
+# 105 headers, and none of the extensionless `cuda/std/*` ones. Among the missing
+# were vector_types.h and vector_functions.h, which PhysX's host code includes
+# (gpucommon/include/cutil_math.h), so a release could not build PhysX's GPU
+# runtime against its own include/ -- reported from the 0.6.0 tarball.
+# Anything added under runtime/api is public by construction; keep it that way.
+install(DIRECTORY runtime/api/
     DESTINATION include
-)
-
-install(FILES
-    runtime/api/nvtx3/nvToolsExt.h
-    DESTINATION include/nvtx3
-)
-
-install(FILES
-    runtime/api/cooperative_groups/reduce.h
-    DESTINATION include/cooperative_groups
-)
-
-install(FILES
-    runtime/api/thrust/thrust.h
-    runtime/api/thrust/device_ptr.h
-    runtime/api/thrust/device_vector.h
-    runtime/api/thrust/host_vector.h
-    runtime/api/thrust/sort.h
-    runtime/api/thrust/reduce.h
-    runtime/api/thrust/scan.h
-    runtime/api/thrust/transform.h
-    runtime/api/thrust/functional.h
-    runtime/api/thrust/unique.h
-    runtime/api/thrust/pair.h
-    runtime/api/thrust/execution_policy.h
-    DESTINATION include/thrust
-)
-
-install(FILES
-    runtime/api/thrust/iterator/counting_iterator.h
-    runtime/api/thrust/iterator/zip_iterator.h
-    runtime/api/thrust/iterator/transform_iterator.h
-    runtime/api/thrust/iterator/constant_iterator.h
-    runtime/api/thrust/iterator/discard_iterator.h
-    runtime/api/thrust/iterator/permutation_iterator.h
-    DESTINATION include/thrust/iterator
-)
-
-install(FILES
-    runtime/api/thrust/system/cuda/vector.h
-    runtime/api/thrust/system/cuda/execution_policy.h
-    DESTINATION include/thrust/system/cuda
-)
-
-install(FILES
-    runtime/api/thrust/system/cuda/detail/par.h
-    DESTINATION include/thrust/system/cuda/detail
-)
-
-install(FILES
-    runtime/api/cub/cub.h
-    DESTINATION include/cub
-)
-
-install(FILES
-    runtime/api/cub/block/block_reduce.h
-    runtime/api/cub/block/block_scan.h
-    runtime/api/cub/block/block_exchange.h
-    runtime/api/cub/block/block_load.h
-    runtime/api/cub/block/block_store.h
-    DESTINATION include/cub/block
-)
-
-install(FILES
-    runtime/api/cub/warp/warp_reduce.h
-    runtime/api/cub/warp/warp_scan.h
-    DESTINATION include/cub/warp
-)
-
-install(FILES
-    runtime/api/cub/device/device_reduce.h
-    runtime/api/cub/device/device_scan.h
-    runtime/api/cub/device/device_radix_sort.h
-    runtime/api/cub/device/device_select.h
-    runtime/api/cub/device/device_histogram.h
-    runtime/api/cub/device/device_run_length_encode.h
-    runtime/api/cub/device/device_partition.h
-    runtime/api/cub/device/device_merge_sort.h
-    DESTINATION include/cub/device
+    PATTERN "CMakeLists.txt" EXCLUDE
 )

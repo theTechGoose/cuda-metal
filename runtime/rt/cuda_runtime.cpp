@@ -1420,6 +1420,9 @@ void apply_pending_restores(const void* stream_key, std::uint64_t up_to_seq) {
             (entry.seq <= up_to_seq ? due : keep).push_back(entry);
         }
         pending.swap(keep);
+        if (pending.empty()) {
+            book.by_stream.erase(it);
+        }
     }
     for (const PendingRestore& entry : due) {
         std::vector<std::uint8_t> staged(entry.count);
@@ -1427,6 +1430,18 @@ void apply_pending_restores(const void* stream_key, std::uint64_t up_to_seq) {
         restore_embedded_host_pointers(&staged);
         std::memcpy(entry.host_dst, staged.data(), entry.count);
     }
+}
+
+// A destroyed stream's key is a heap address the allocator will hand out again.
+// destroy_stream() synchronizes, so the blits noted against it have landed and
+// their restores are due now; what is left afterwards must be forgotten, or the
+// next stream allocated at this address inherits them and writes through
+// host destinations that may already be freed.
+void forget_stream_restores(const void* stream_key) {
+    RestoreBook& book = restore_book();
+    std::lock_guard<std::mutex> lock(book.mutex);
+    book.by_stream.erase(stream_key);
+    book.seq_by_stream.erase(stream_key);
 }
 
 void apply_all_pending_restores() {
@@ -4457,6 +4472,10 @@ cudaError_t cudaStreamDestroy(cudaStream_t stream) {
 
     std::string error;
     const cudaError_t status = cumetal::metal_backend::destroy_stream(backend_stream, &error);
+    if (status == cudaSuccess) {
+        apply_pending_restores(backend_stream.get(), std::numeric_limits<std::uint64_t>::max());
+    }
+    forget_stream_restores(backend_stream.get());
     delete stream;
     return fail(status);
 }
