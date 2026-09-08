@@ -70,8 +70,13 @@ on_exit() {
     local code=$?
     if [ "$code" -ne 0 ] && [ "$BUMPED" -eq 1 ] && [ "$PUBLISHED" -eq 0 ]; then
         printf '\ndeploy: run failed -- restoring %s\n' "$VERSIONED_FILES" >&2
+        # From HEAD, not from the index. publish() stages these before committing,
+        # so a plain `git checkout -- <paths>` restores the staged (already bumped)
+        # content over itself and silently changes nothing -- which is worse than
+        # not trying, because the message says it worked.
         # shellcheck disable=SC2086
-        git checkout -- $VERSIONED_FILES 2>/dev/null || true
+        git checkout HEAD -- $VERSIONED_FILES 2>/dev/null || true
+        git reset -q HEAD -- $VERSIONED_FILES 2>/dev/null || true
     fi
     return $code
 }
@@ -125,6 +130,13 @@ preflight() {
     if [ "$PUBLISH" -eq 1 ]; then
         command -v gh >/dev/null 2>&1 || die "gh is required for --publish"
         gh auth status >/dev/null 2>&1 || die "gh is not authenticated (gh auth login)"
+        # Checked here rather than discovered at the commit, which happens after a
+        # full build and test run: a missing identity should cost a second, not
+        # twenty minutes.
+        git config user.email >/dev/null 2>&1 \
+            || die "git has no author identity; set user.email and user.name"
+        git config user.name >/dev/null 2>&1 \
+            || die "git has no author identity; set user.email and user.name"
     fi
 
     grep -q '^## \[Unreleased\]' CHANGELOG.md \
