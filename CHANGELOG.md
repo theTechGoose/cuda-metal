@@ -6,6 +6,8 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-09-09
+
 ### Fixed
 
 - **`cudnn.h` declares `CUDNN_VERSION`, `CUDNN_MAJOR`, `CUDNN_MINOR` and `CUDNN_PATCHLEVEL`.**
