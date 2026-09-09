@@ -3128,7 +3128,13 @@ cudnnStatus_t cudnnSetRNNDescriptor_v8(cudnnRNNDescriptor_t rnnDesc,
     // weight space, and the bounded engine does not implement it. Refuse rather
     // than ignore the parameter: a silently unprojected LSTM would produce
     // confidently wrong output.
-    if (projSize != 0 && projSize != hiddenSize) {
+    //
+    // ANY nonzero projSize is a refusal, including projSize == hiddenSize. That
+    // is not a no-op projection -- it is a learned [hiddenSize, hiddenSize] map
+    // that the weight space has to carry and the recurrence has to apply. An
+    // earlier form of this guard let it through and then ignored it, which is
+    // the exact failure the paragraph above says it is preventing.
+    if (projSize != 0) {
         return CUDNN_STATUS_NOT_SUPPORTED;
     }
     rnnDesc->hiddenSize = hiddenSize;

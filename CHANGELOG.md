@@ -6,6 +6,19 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every nonzero `projSize` is refused by `cudnnSetRNNDescriptor_v8`, including
+  `projSize == hiddenSize`.** 0.6.5 guarded with `projSize != 0 && projSize != hiddenSize`, so
+  a projection whose output width equals the hidden size was accepted and then ignored — the
+  engine computed an unprojected LSTM. That is exactly the failure the comment beside the guard
+  said it was preventing: a silently unprojected LSTM returns confidently wrong output.
+  `projSize == hiddenSize` is not a no-op; it is a learned `[hiddenSize, hiddenSize]` map the
+  weight space must carry and the recurrence must apply. Narrow in practice — PyTorch asserts
+  `proj_size < hidden_size`, so torch cannot reach it — but a direct cuDNN caller could, and
+  would have received plausible wrong numbers rather than a refusal. The test now checks four
+  nonzero widths rather than one.
+
 ## [0.6.5] - 2026-09-09
 
 ### Changed

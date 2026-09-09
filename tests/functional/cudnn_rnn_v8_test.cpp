@@ -197,15 +197,23 @@ int main() {
     }
 
     // Projection must be refused, not ignored: a silently unprojected LSTM
-    // would return confidently wrong output.
-    if (cudnnSetRNNDescriptor_v8(rnn, CUDNN_RNN_ALGO_STANDARD, CUDNN_LSTM,
-                                 CUDNN_RNN_DOUBLE_BIAS, CUDNN_UNIDIRECTIONAL,
-                                 CUDNN_LINEAR_INPUT, CUDNN_DATA_FLOAT,
-                                 CUDNN_DATA_FLOAT, CUDNN_DEFAULT_MATH,
-                                 kInput, kHidden, kHidden / 2, kLayers, nullptr, 0)
-        != CUDNN_STATUS_NOT_SUPPORTED) {
-        std::fprintf(stderr, "FAIL: proj_size != 0 was accepted; it must be refused\n");
-        return 1;
+    // would return confidently wrong output. EVERY nonzero projSize is a
+    // refusal, including projSize == hiddenSize -- that is a learned
+    // [hiddenSize, hiddenSize] map, not a no-op, and an earlier guard let it
+    // through and then ignored it.
+    const int refuse_proj[] = {kHidden / 2, kHidden, kHidden - 1, 1};
+    for (int proj : refuse_proj) {
+        if (cudnnSetRNNDescriptor_v8(rnn, CUDNN_RNN_ALGO_STANDARD, CUDNN_LSTM,
+                                     CUDNN_RNN_DOUBLE_BIAS, CUDNN_UNIDIRECTIONAL,
+                                     CUDNN_LINEAR_INPUT, CUDNN_DATA_FLOAT,
+                                     CUDNN_DATA_FLOAT, CUDNN_DEFAULT_MATH,
+                                     kInput, kHidden, proj, kLayers, nullptr, 0)
+            != CUDNN_STATUS_NOT_SUPPORTED) {
+            std::fprintf(stderr,
+                         "FAIL: proj_size %d was accepted; every nonzero projection "
+                         "must be refused, not silently ignored\n", proj);
+            return 1;
+        }
     }
 
     cudnnDestroyRNNDataDescriptor(yStep);
