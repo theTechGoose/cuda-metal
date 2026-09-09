@@ -6,6 +6,8 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-09-09
+
 ### Fixed
 
 - **`cumetalc` builds a host-only `.c`/`.cpp` that calls the CUDA library APIs, and accepts
