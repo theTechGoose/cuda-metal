@@ -3450,6 +3450,16 @@ add_test(
     COMMAND cumetal_cudnn_rnn_v8_test
 )
 
+# The same check at Parakeet's prediction-network dimensions (input/hidden 640,
+# 2 layers, a 26 MB weight space), so sizing and indexing are covered at the
+# scale a consumer runs rather than only at toy dimensions.
+add_test(
+    NAME functional_cudnn_rnn_v8_real_shape
+    COMMAND cumetal_cudnn_rnn_v8_test
+)
+set_tests_properties(functional_cudnn_rnn_v8_real_shape PROPERTIES
+    ENVIRONMENT "CUMETAL_RNN_V8_REAL_SHAPE=1")
+
 add_test(
     NAME functional_cudnn_attention
     COMMAND cumetal_cudnn_attention_test

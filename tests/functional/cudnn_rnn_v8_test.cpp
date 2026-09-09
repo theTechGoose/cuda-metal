@@ -20,11 +20,16 @@
 
 namespace {
 
-constexpr int kInput = 8;
-constexpr int kHidden = 8;
-constexpr int kLayers = 2;
-constexpr int kBatch = 3;
-constexpr int kSeq = 5;
+// Small by default so the equivalence check is quick, but the shape that
+// matters is Parakeet's prediction network: input 640, hidden 640, 2 layers,
+// which is a 26 MB weight space. CUMETAL_RNN_V8_REAL_SHAPE=1 runs that instead,
+// so sizing and indexing are exercised at the dimensions a consumer actually
+// uses rather than only at dimensions that fit in a cache line.
+const int kInput = std::getenv("CUMETAL_RNN_V8_REAL_SHAPE") ? 640 : 8;
+const int kHidden = std::getenv("CUMETAL_RNN_V8_REAL_SHAPE") ? 640 : 8;
+const int kLayers = 2;
+const int kBatch = 3;
+const int kSeq = 5;
 
 bool check(cudnnStatus_t s, const char* what) {
     if (s != CUDNN_STATUS_SUCCESS) {
@@ -201,7 +206,7 @@ int main() {
     // refusal, including projSize == hiddenSize -- that is a learned
     // [hiddenSize, hiddenSize] map, not a no-op, and an earlier guard let it
     // through and then ignored it.
-    const int refuse_proj[] = {kHidden / 2, kHidden, kHidden - 1, 1};
+    const int refuse_proj[] = {kHidden / 2, kHidden, kHidden - 1, 1};  // == kHidden included on purpose
     for (int proj : refuse_proj) {
         if (cudnnSetRNNDescriptor_v8(rnn, CUDNN_RNN_ALGO_STANDARD, CUDNN_LSTM,
                                      CUDNN_RNN_DOUBLE_BIAS, CUDNN_UNIDIRECTIONAL,
@@ -225,8 +230,9 @@ int main() {
     cudnnDestroyRNNDescriptor(rnn);
     cudnnDestroy(handle);
 
-    std::printf("PASS: v8 RNN — %d single-timestep calls with carried state match one "
-                "full-sequence call, weight params land in the space, projection refused\n",
-                kSeq);
+    std::printf("PASS: v8 RNN input=%d hidden=%d layers=%d batch=%d — %d single-timestep "
+                "calls with carried state match one full-sequence call, weight space %zu B, "
+                "weight params land in it, every nonzero projection refused\n",
+                kInput, kHidden, kLayers, kBatch, kSeq, weight_bytes);
     return 0;
 }
