@@ -6,6 +6,8 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-09-09
+
 ### Fixed
 
 - **A release can compile FP64 kernels on a machine that has never seen this checkout.**
