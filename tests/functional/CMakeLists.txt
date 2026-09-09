@@ -3495,6 +3495,19 @@ add_test(
     COMMAND cumetal_cusolver_sparse_test
 )
 
+# A host-only .c that calls the cuDNN surface, built with the flags a real CUDA
+# build line carries. Found by a consumer running the documented command, which
+# failed twice over: -lcudnn was rejected as an unknown option, and a .c input
+# was rejected outright.
+add_test(
+    NAME functional_cumetalc_host_only_cudnn
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_host_only.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/host_only_cudnn_program.c
+            ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_host_only
+)
+
 # Native-AOT source exit criterion: `cumetalc foo.cu -o foo` embeds a typed
 # metallib and registers host launch stubs through the versioned CuMetal ABI.
 if(CUMETAL_ENABLE_CUDA_REGISTRATION)

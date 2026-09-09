@@ -6,6 +6,21 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cumetalc` builds a host-only `.c`/`.cpp` that calls the CUDA library APIs, and accepts
+  `-l`/`-L`.** Both halves of a real ported build line were rejected: `-lcudnn` came back as
+  `unknown option`, and a `.c` input as `unsupported input extension for xcrun mode`. So the
+  documented porting story — replace the compiler, keep the rest — did not survive contact with
+  a program that calls cuDNN from plain C and contains no device code, which is exactly the
+  shape of a consumer's layout-dump or probe tool. `-l`/`-L` are now collected (joined or
+  separated) and passed to the link line, where `-lcudnn` resolves through the alias installed
+  beside `libcumetal`; a host-only input compiles and links directly against the CuMetal headers
+  and library without the caller knowing either path.
+
+  Found by running transcription-box's `run_dump.sh` unmodified on the Mac — the command line
+  this project had told them to use.
+
 ### Added
 
 - **The cuDNN v8 LSTM is now checked against PyTorch's numbers, not only against itself.**

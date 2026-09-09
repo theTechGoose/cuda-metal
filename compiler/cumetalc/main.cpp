@@ -475,6 +475,60 @@ bool emit_inspection_stage(const cumetal::metal::PtxToMslResult& compiled,
 std::string g_math_mode = "safe";
 bool g_fp_contract = true;
 
+// Render collected -l/-L flags for the link line. Each was already validated as
+// a linker flag at parse time, so quoting the whole token keeps a path with a
+// space intact without letting it become two arguments.
+std::string extra_link_args(const std::vector<std::string>& args) {
+    std::string out;
+    for (const std::string& a : args) out += " " + quote_shell(a);
+    return out;
+}
+
+// A host-only translation unit: plain C or C++ that calls the CUDA *library*
+// APIs (cuDNN, cuBLAS, cuFFT...) and contains no device code. Real toolchains
+// build these with the host compiler and -lcudnn; the CuMetal equivalent has to
+// work the same way, because a consumer porting a build line replaces `gcc` with
+// `cumetalc` and expects the rest to survive. Rejecting .c sent them to hand-
+// written -I/-L paths that only cumetalc knows.
+int run_host_only_driver(const std::filesystem::path& input,
+                         const std::filesystem::path& output,
+                         const std::vector<std::string>& defines,
+                         const std::vector<std::filesystem::path>& include_dirs,
+                         const std::vector<std::string>& link_args,
+                         const char* argv0) {
+    const ResourceLayout layout = resolve_resources(argv0);
+    if (!layout.ok) {
+        std::cerr << "cumetalc failed: could not locate the CuMetal headers and "
+                     "libcumetal.dylib needed to build a host program.\n"
+                     "  Set CUMETAL_ROOT to the install prefix, or run cumetalc from the "
+                     "build directory.\n";
+        return 1;
+    }
+    const std::string ext = lower_ext(input);
+    const bool is_cxx = (ext != ".c");
+    const std::string cc = is_cxx ? "clang++" : "clang";
+
+    std::string cmd = cc + " " + quote_shell(input.string());
+    for (const std::string& d : defines) cmd += " -D" + quote_shell(d);
+    for (const auto& dir : include_dirs) cmd += " -I " + quote_shell(dir.string());
+    cmd += " -I " + quote_shell(layout.include_dir.string());
+    cmd += " -L " + quote_shell(layout.lib_dir.string()) + " -lcumetal -Wl,-rpath," +
+           quote_shell(layout.lib_dir.string());
+    cmd += extra_link_args(link_args);
+    cmd += " -o " + quote_shell(output.string()) + " 2>&1";
+
+    const CommandResult result = run_command_capture(cmd);
+    if (!result.output.empty()) {
+        std::cerr << result.output;
+        if (result.output.back() != '\n') std::cerr << '\n';
+    }
+    if (!result.started || result.exit_code != 0) {
+        std::cerr << "cumetalc failed: host compilation of " << input.string() << "\n";
+        return result.started ? result.exit_code : 1;
+    }
+    return 0;
+}
+
 struct ExecutableDriverOptions {
     std::filesystem::path input;
     std::filesystem::path output;
@@ -487,6 +541,12 @@ struct ExecutableDriverOptions {
     BackendKind backend = BackendKind::kCumetalIr;
     cumetal::ptx::Fp64Mode fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
     bool keep_intermediates = false;
+    // -l/-L as written on a real CUDA build line. libcumetal already provides
+    // every CUDA library surface, and the install ships libcudnn/libcublas/...
+    // aliases beside it, so these resolve -- but only if we pass them through
+    // rather than rejecting them. A user porting `nvcc x.cu -lcudnn` should not
+    // have to discover that the flag must be deleted.
+    std::vector<std::string> link_args;
 };
 
 int run_legacy_executable_driver(const ExecutableDriverOptions& options,
@@ -576,7 +636,8 @@ int run_legacy_executable_driver(const ExecutableDriverOptions& options,
     }
     const std::string link = quote_shell(compiler.string()) + " " +
         quote_shell(object.string()) + " -L " + quote_shell(layout.lib_dir.string()) +
-        " -lcumetal -Wl,-rpath," + quote_shell(layout.lib_dir.string()) + " -o " +
+        " -lcumetal -Wl,-rpath," + quote_shell(layout.lib_dir.string()) +
+        extra_link_args(options.link_args) + " -o " +
         quote_shell(options.output.string()) + " 2>&1";
     const CommandResult linked = run_command_capture(link);
     if (!linked.output.empty()) std::cerr << linked.output;
@@ -1234,7 +1295,8 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
                              quote_shell(object_file.string()) + " " +
                              quote_shell(registration_object.string()) + " -L " +
                              quote_shell(layout.lib_dir.string()) + " -lcumetal -Wl,-rpath," +
-                             quote_shell(layout.lib_dir.string()) + " -o " +
+                             quote_shell(layout.lib_dir.string()) +
+                             extra_link_args(options.link_args) + " -o " +
                              quote_shell(options.output.string()) + " 2>&1";
 
     const CommandResult link_result = run_command_capture(link);
@@ -1279,6 +1341,7 @@ int main(int argc, char** argv) {
     std::string cuda_inline_threshold;
     std::vector<std::filesystem::path> cuda_include_dirs;
     std::vector<std::string> cuda_defines;
+    std::vector<std::string> link_args;
     std::vector<std::filesystem::path> cuda_forced_includes;
     std::vector<std::string> cuda_undefines;
     std::vector<std::string> extra_clang_args;
@@ -1484,6 +1547,15 @@ int main(int argc, char** argv) {
                 return 2;
             }
             fp64_mode_set_explicitly = true;
+        } else if (arg == "-l" || arg == "-L") {
+            // Separated form: `-l cudnn`. clang accepts it, so accept it here.
+            if (i + 1 >= argc) {
+                std::cerr << arg << " expects a name\n";
+                return 2;
+            }
+            link_args.emplace_back(arg + argv[++i]);
+        } else if (arg.size() > 2 && (arg.substr(0, 2) == "-l" || arg.substr(0, 2) == "-L")) {
+            link_args.emplace_back(arg);
         } else if (arg == "--link") {
             link_executable = true;
             link_requested_explicitly = true;
@@ -1572,6 +1644,7 @@ int main(int argc, char** argv) {
             options.output.replace_extension();
         }
         ExecutableDriverOptions driver;
+        driver.link_args = link_args;
         driver.input = options.input;
         driver.output = options.output;
         driver.cuda_clang = cuda_clang;
@@ -1599,6 +1672,15 @@ int main(int argc, char** argv) {
     std::filesystem::path temp_stage_file;
     std::string abi_sidecar;
     std::string input_ext = lower_ext(options.input);
+    if (input_ext == ".c" || input_ext == ".cpp" || input_ext == ".cc" ||
+        input_ext == ".cxx") {
+        if (options.output.empty()) {
+            std::cerr << "cumetalc failed: building a host program needs -o <output>\n";
+            return 2;
+        }
+        return run_host_only_driver(options.input, options.output, cuda_defines,
+                                    cuda_include_dirs, link_args, argv[0]);
+    }
     if (input_ext == ".cu" && cuda_device_frontend) {
         const std::filesystem::path compiler = find_cuda_clang(cuda_clang);
         if (compiler.empty() || !std::filesystem::exists(compiler)) {
