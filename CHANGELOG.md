@@ -6,6 +6,16 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Releases ship the PhysX patch series**, under `share/cumetal/physx-patches/`, so building
+  PhysX's GPU runtime against a release no longer needs the source archive fetched alongside it
+  purely for these files. The patches are diffs against NVIDIA PhysX (tag `107.3-physx-5.6.1`,
+  commit `5ca9f47`), which is BSD 3-Clause, so they carry its source as diff context; `NOTICE.md`
+  and the verbatim upstream `PHYSX-LICENSE.md` ship with them, which is the attribution that
+  license asks of a source redistribution. The release fails if either is missing from the stage
+  or if the staged license text is not the BSD-3 notice.
+
 ## [0.6.4] - 2026-09-09
 
 ### Fixed

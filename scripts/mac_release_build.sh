@@ -143,6 +143,22 @@ done
 }
 echo "  support sources staged"
 
+# The PhysX patches are diffs against BSD-3-Clause source, so the attribution
+# has to travel with them. Shipping the series without its NOTICE and the
+# upstream licence text is the one way this becomes a real problem, so it fails
+# the release rather than being left to review.
+for required in NOTICE.md PHYSX-LICENSE.md apply_physx_patches.sh; do
+    [ -f "$STAGE_DIR/share/cumetal/physx-patches/$required" ] || {
+        printf 'release: physx-patches/%s is missing from the staged tree\n' "$required" >&2
+        exit 1
+    }
+done
+command grep -q "BSD 3-Clause" "$STAGE_DIR/share/cumetal/physx-patches/PHYSX-LICENSE.md" || {
+    printf 'release: the staged PhysX licence text is not the BSD 3-Clause notice\n' >&2
+    exit 1
+}
+echo "  physx-patches staged with NOTICE and the upstream BSD-3 licence"
+
 # The files are staged -- now prove they actually WORK, by compiling an
 # FP64-touching kernel with the staged cumetalc and confirming the support
 # source it reached for was the staged one and not this checkout. A presence

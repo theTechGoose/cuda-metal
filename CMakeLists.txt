@@ -755,6 +755,17 @@ endif()
 # with xcrun at need (the FP64 helpers the legacy path air-links), so a release
 # that omits them has a compiler that cannot finish an FP64-touching kernel on
 # any machine but the one that built it.
+# The PhysX patch series, so a release can build PhysX's GPU runtime without
+# also fetching the source archive just for these. They are diffs against
+# BSD-3-Clause PhysX and carry its source as context, so NOTICE.md and the
+# verbatim upstream PHYSX-LICENSE.md ship with them -- that is the attribution
+# the license asks of a source redistribution, and the reason the whole
+# directory installs rather than the .patch files alone.
+install(DIRECTORY scripts/physx-patches/
+    DESTINATION share/cumetal/physx-patches
+    USE_SOURCE_PERMISSIONS
+)
+
 # Laid out as a miniature source tree rather than two loose files: the support
 # sources reach VF64-metal's shaders with a relative include
 # (../../../third_party/VF64-metal/...), and mirroring compiler/ and

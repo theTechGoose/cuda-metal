@@ -3,6 +3,10 @@
 These patches target NVIDIA Omniverse PhysX tag `107.3-physx-5.6.1`,
 commit `5ca9f472105a90d70d957c243cb0ef36fe251a9f`.
 
+PhysX is BSD 3-Clause and these are diffs against it, so they carry its source
+as context. `NOTICE.md` and `PHYSX-LICENSE.md` beside this file are the
+attribution that license asks for, and they ship with the series.
+
 Apply the patch set to a sibling checkout:
 
 ```bash
