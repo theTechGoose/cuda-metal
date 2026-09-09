@@ -79,26 +79,32 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   model whose config declares dropout still satisfies it at inference, because
   PyTorch passes `train ? dropout : 0` and calls `set_no_dropout` under
   `eval()`. A declared nonzero dropout is therefore not by itself a reason to
-  expect refusal. It is the LEGACY v6/v7 entry points only --
-  `cudnnSetRNNDescriptor_v6`, `cudnnRNNForwardInference`,
-  `cudnnRNNForwardTraining`. The v8 RNN API is absent entirely, not merely
-  restricted: `cudnnSetRNNDescriptor_v8`, `cudnnRNNForward`,
-  `cudnnSetRNNDataDescriptor`, `cudnnGetRNNWeightParams` and
-  `cudnnBuildRNNDynamic` are not declared. Recurrent projection (LSTMP,
-  PyTorch's `proj_size != 0`) is unsupported at every generation: v7's
-  `cudnnSetRNNProjectionLayers` is absent and the v6 descriptor has no
-  projection field. The weight-layout queries are absent too --
-  `cudnnGetRNNLinLayerMatrixParams` and `cudnnGetRNNLinLayerBiasParams` (v7)
-  alongside `cudnnGetRNNWeightParams` (v8) -- and a framework uses those to
-  place weights for ANY RNN, not only a projected one, so the gap is wider than
-  projection. Practical consequence worth stating, because it is not
-  deducible from the list above: `torch.nn.LSTM` on CUDA reaches none of this.
-  PyTorch's `aten/src/ATen/native/cudnn/RNN.cpp` carries both generations behind
-  the compile-time `USE_CUDNN_RNN_V8_API` macro -- v8 when defined, which modern
-  cuDNN builds do, and the v7 calls otherwise -- and BOTH branches fail here,
-  the v8 one on absent entry points and the v7 one on the absent weight-layout
-  queries. That second half applies to an ordinary `proj_size = 0` LSTM as much
-  as a projected one. Its timestep/state geometry, parameter sizes, scratch
+  expect refusal, though dropout is ignored rather than applied, so a TRAINING-
+  mode RNN is not equivalent even where it is accepted.
+
+  Both API generations are present: the legacy v6/v7 entry points and the v8
+  API a framework actually calls (`cudnnSetRNNDescriptor_v8`,
+  `cudnnRNNForward`, `cudnnSetRNNDataDescriptor`, `cudnnGetRNNWeightParams`,
+  `cudnnGetRNNWeightSpaceSize`, `cudnnGetRNNTempSpaceSizes`,
+  `cudnnBuildRNNDynamic`), alongside the v7 weight-layout queries
+  `cudnnGetRNNLinLayerMatrixParams`/`BiasParams`. This matters because
+  PyTorch's `aten/src/ATen/native/cudnn/RNN.cpp` carries both generations
+  behind the compile-time `USE_CUDNN_RNN_V8_API` macro, and a framework uses
+  the weight-layout queries to place weights for ANY RNN, not only a projected
+  one.
+
+  What remains absent is narrower than it once was, and the boundaries are
+  refusals rather than silent approximations. Recurrent projection (LSTMP,
+  PyTorch's `proj_size != 0`) is unsupported at every generation, and EVERY
+  nonzero `projSize` is refused -- including `projSize == hiddenSize`, which is
+  a learned map rather than a no-op. `CUDNN_SKIP_INPUT` and the three
+  non-double bias modes are refused as well; cuDNN reports `nbDims = 0` for the
+  weights those modes make absent, and this implementation has no such path, so
+  accepting one would leave the weight query describing a matrix that is not
+  there.
+
+  Execution is still CPU-backed: the v8 forward computes correct numbers but
+  does not run on the GPU. Its timestep/state geometry, parameter sizes, scratch
   sizes, and tracked allocation spans are checked, but backward RNN, packed or
   variable sequences, nonzero dropout, persistent algorithms, and broader
   descriptor formats are absent. Attention forward is limited to

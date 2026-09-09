@@ -83,10 +83,26 @@ full NVIDIA library implementations.
   parameter/workspace/reserve geometry, and rejects short tracked input,
   weight, output, state, or scratch allocations before CPU access. Only
   zero-dropout, standard-algorithm FP32 linear-input RNN/GRU/LSTM modes are
-  accepted, through the legacy v6/v7 entry points; the v8 RNN API and the
-  weight-layout queries a framework needs are absent, so a PyTorch LSTM does not
-  reach this path at all. See [the library gaps](../known-gaps/libraries.md)
-  before reading the acceptance list above as availability. The bounded attention forward path accepts projection-free,
+  accepted, through both the legacy v6/v7 entry points and the v8 API a
+  framework actually calls (`cudnnSetRNNDescriptor_v8`, `cudnnRNNForward`, the
+  RNN data descriptor, and the weight-space and weight-parameter queries).
+  Configurations the engine does not implement are refused at descriptor set
+  rather than silently ignored: every nonzero `projSize`, `CUDNN_SKIP_INPUT`,
+  and the three non-double bias modes. That refusal is load-bearing beyond the
+  arithmetic — cuDNN reports `nbDims = 0` for weights those modes make absent,
+  and this implementation has no such path, so accepting one would leave the
+  weight query describing a matrix that is not there.
+
+  On the weight space: `cudnnGetRNNWeightSpaceSize` returns the exact parameter
+  sum with no interior padding, which matches cuDNN's documented "minimum size
+  in bytes". Whether NVIDIA pads above that minimum is unverified here. It is
+  also not load-bearing for a framework: PyTorch allocates
+  `at::empty(num_weights)` from whatever the library reports and never checks it
+  against its own parameter sum, so what has to hold is that the size and
+  `cudnnGetRNNWeightParams` agree with each other — which the test suite pins,
+  including against a real `torch.nn.LSTM`'s numbers. See
+  [the library gaps](../known-gaps/libraries.md) before reading the acceptance
+  list above as availability. The bounded attention forward path accepts projection-free,
   dropout-free FP32 canonical time/batch/beam/vector descriptors; it validates
   configured maxima, checked tensor spans, non-overlapping output, and rejects
   residuals, windows, incremental mode, variable lengths, and scratch buffers
