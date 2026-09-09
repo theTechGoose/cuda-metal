@@ -75,7 +75,18 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   OpTensor broadcasting, fusion, training/backward breadth, graph integration,
   datatype, and layout coverage remain incomplete. Forward RNN/GRU/LSTM is a
   bounded, CPU-backed FP32/NCHW path: standard algorithm, linear input, and
-  zero dropout only. Its timestep/state geometry, parameter sizes, scratch
+  zero dropout only. It is the LEGACY v6/v7 entry points only --
+  `cudnnSetRNNDescriptor_v6`, `cudnnRNNForwardInference`,
+  `cudnnRNNForwardTraining`. The v8 RNN API is absent entirely, not merely
+  restricted: `cudnnSetRNNDescriptor_v8`, `cudnnRNNForward`,
+  `cudnnSetRNNDataDescriptor`, `cudnnGetRNNWeightParams` and
+  `cudnnBuildRNNDynamic` are not declared. Recurrent projection (LSTMP,
+  PyTorch's `proj_size != 0`) is unsupported at every generation: v7's
+  `cudnnSetRNNProjectionLayers` is absent and the v6 descriptor has no
+  projection field. Practical consequence worth stating, because it is not
+  deducible from the list above: `torch.nn.LSTM` on CUDA with a modern cuDNN
+  drives the v8 API, so a PyTorch LSTM does not reach this surface at all
+  today. Its timestep/state geometry, parameter sizes, scratch
   sizes, and tracked allocation spans are checked, but backward RNN, packed or
   variable sequences, nonzero dropout, persistent algorithms, and broader
   descriptor formats are absent. Attention forward is limited to
