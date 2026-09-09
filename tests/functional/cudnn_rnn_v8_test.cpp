@@ -61,6 +61,40 @@ int main() {
         return 1;
     }
 
+    // cuDNN 8.9.7 documents that cudnnGetRNNWeightParams reports nbDims = 0 when
+    // a weight matrix or bias does not exist -- the first layer's input GEMMs
+    // under CUDNN_SKIP_INPUT, and the absent biases under the non-double bias
+    // modes. CuMetal does not implement that reporting, so the only thing
+    // keeping it honest is that those configurations are refused outright. If
+    // one is ever accepted without the nbDims = 0 path, a caller sizing from
+    // this query reads a matrix that is not there.
+    {
+        const struct { const char* what; cudnnRNNInputMode_t im; cudnnRNNBiasMode_t bm; }
+            unsupported[4] = {
+                {"CUDNN_SKIP_INPUT", CUDNN_SKIP_INPUT, CUDNN_RNN_DOUBLE_BIAS},
+                {"CUDNN_RNN_NO_BIAS", CUDNN_LINEAR_INPUT, CUDNN_RNN_NO_BIAS},
+                {"CUDNN_RNN_SINGLE_INP_BIAS", CUDNN_LINEAR_INPUT, CUDNN_RNN_SINGLE_INP_BIAS},
+                {"CUDNN_RNN_SINGLE_REC_BIAS", CUDNN_LINEAR_INPUT, CUDNN_RNN_SINGLE_REC_BIAS},
+            };
+        for (const auto& u : unsupported) {
+            cudnnRNNDescriptor_t probe = nullptr;
+            if (!check(cudnnCreateRNNDescriptor(&probe), "createRNNDescriptor probe")) {
+                return 1;
+            }
+            const cudnnStatus_t st = cudnnSetRNNDescriptor_v8(
+                probe, CUDNN_RNN_ALGO_STANDARD, CUDNN_LSTM, u.bm, CUDNN_UNIDIRECTIONAL,
+                u.im, CUDNN_DATA_FLOAT, CUDNN_DATA_FLOAT, CUDNN_DEFAULT_MATH,
+                kInput, kHidden, 0, kLayers, nullptr, 0);
+            cudnnDestroyRNNDescriptor(probe);
+            if (st == CUDNN_STATUS_SUCCESS) {
+                std::fprintf(stderr,
+                             "FAIL: %s was accepted, but the weight-params query has no "
+                             "nbDims = 0 path for the tensors it makes absent\n", u.what);
+                return 1;
+            }
+        }
+    }
+
     size_t weight_bytes = 0;
     if (!check(cudnnGetRNNWeightSpaceSize(handle, rnn, &weight_bytes),
                "cudnnGetRNNWeightSpaceSize")) {
