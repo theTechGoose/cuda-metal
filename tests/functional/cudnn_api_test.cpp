@@ -539,6 +539,27 @@ static bool test_version_and_error() {
         std::fprintf(stderr, "FAIL: cudnnGetVersion returned 0\n");
         return false;
     }
+    // The header must declare the same generation the runtime reports.
+    // Consumers branch on the MACRO at compile time -- PyTorch's
+    // aten/src/ATen/cudnn/cudnn-wrapper.h does
+    // `#if CUDNN_MAJOR < 8 || (CUDNN_MAJOR == 8 && CUDNN_MINOR < 5)` -- and an
+    // undefined macro is 0 in a preprocessor comparison, so a missing or
+    // disagreeing version silently selects the wrong branch instead of failing.
+#if !defined(CUDNN_VERSION) || !defined(CUDNN_MAJOR) || !defined(CUDNN_MINOR) || \
+    !defined(CUDNN_PATCHLEVEL)
+#error "cudnn.h must define CUDNN_VERSION/MAJOR/MINOR/PATCHLEVEL; consumers branch on them"
+#endif
+#if CUDNN_MAJOR < 8 || (CUDNN_MAJOR == 8 && CUDNN_MINOR < 5)
+#error "the declared cuDNN generation is below the v8 RNN API this runtime implements"
+#endif
+    if (ver != static_cast<size_t>(CUDNN_VERSION)) {
+        std::fprintf(stderr,
+                     "FAIL: cudnnGetVersion() is %zu but the header declares "
+                     "CUDNN_VERSION %d; a version check that disagrees with itself is "
+                     "worse than none\n",
+                     ver, (int)CUDNN_VERSION);
+        return false;
+    }
     const char* err = cudnnGetErrorString(CUDNN_STATUS_SUCCESS);
     if (!err || std::strlen(err) == 0) {
         std::fprintf(stderr, "FAIL: cudnnGetErrorString returned null/empty\n");

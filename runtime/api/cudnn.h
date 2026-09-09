@@ -12,6 +12,23 @@
 
 #include <stddef.h>
 
+// The API generation this header describes. Consumers branch on these at
+// COMPILE time -- `#if CUDNN_VERSION >= 8000`, and PyTorch's own
+// aten/src/ATen/cudnn/cudnn-wrapper.h does
+// `#if CUDNN_MAJOR < 8 || (CUDNN_MAJOR == 8 && CUDNN_MINOR < 5)`. An undefined
+// macro is 0 in a preprocessor comparison, so omitting these does not produce a
+// diagnostic: it silently selects the pre-v8 branch of every consumer that asks,
+// which is the opposite of what this header implements. It must equal what
+// cudnnGetVersion() returns at runtime, because a version check that disagrees
+// with itself is worse than no version at all; a test pins the two together.
+//
+// This states which cuDNN API generation CuMetal implements. It is not a claim
+// to be NVIDIA's 8.9.7 binary.
+#define CUDNN_MAJOR 8
+#define CUDNN_MINOR 9
+#define CUDNN_PATCHLEVEL 7
+#define CUDNN_VERSION (CUDNN_MAJOR * 1000 + CUDNN_MINOR * 100 + CUDNN_PATCHLEVEL)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
