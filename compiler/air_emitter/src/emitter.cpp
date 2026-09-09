@@ -14,10 +14,17 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <cstdlib>
 #include <dlfcn.h>
+
+// Absent in a release build on purpose: a shipped binary must not carry the
+// path of the checkout that produced it. See CUMETAL_EMBED_SOURCE_DIR.
+#ifndef CUMETAL_SOURCE_DIR
+#define CUMETAL_SOURCE_DIR ""
+#endif
 #include <vector>
 
 namespace cumetal::air_emitter {
@@ -80,9 +87,11 @@ std::filesystem::path metal_support_dir() {
 
         // 3. The source tree, so an uninstalled build works. A RELEASE must never
         //    reach this: the path names the machine that built it.
-        const std::filesystem::path source =
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" / "support";
-        if (has_support(source)) return source;
+        if (const std::string_view source_root{CUMETAL_SOURCE_DIR}; !source_root.empty()) {
+            const std::filesystem::path source =
+                std::filesystem::path(source_root) / "compiler" / "metal" / "support";
+            if (has_support(source)) return source;
+        }
 
         return {};
     }();

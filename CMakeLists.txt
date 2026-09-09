@@ -2,6 +2,15 @@ cmake_minimum_required(VERSION 3.28)
 
 project(cumetal VERSION 0.6.2 LANGUAGES C CXX OBJCXX)
 
+# A build tree needs to find its own sources (headers in runtime/api, the Metal
+# support sources) because they are not installed anywhere yet. A RELEASE must
+# not: baking this checkout's path into a shipped binary is how 0.6.1 came to
+# hand xcrun a file that existed only on the machine that built it. Release
+# builds turn this off, and mac_release_build.sh asserts it, so the fallback is
+# not merely unused in a release -- it is not there.
+option(CUMETAL_EMBED_SOURCE_DIR
+    "Embed this checkout's path so an uninstalled build can find its own sources" ON)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -336,7 +345,7 @@ target_link_libraries(cumetal_runtime
 
 target_compile_definitions(cumetal_runtime
     PRIVATE
-        CUMETAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        $<$<BOOL:${CUMETAL_EMBED_SOURCE_DIR}>:CUMETAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}">
         CUMETAL_VF64_SUPPORT_SHA256="${CUMETAL_VF64_SUPPORT_SHA256}"
         VKFFT_BACKEND=5
 )
@@ -458,7 +467,7 @@ target_compile_options(cumetal_air_emitter
 # resolves them from its own location instead -- see metal_support_dir().
 target_compile_definitions(cumetal_air_emitter
     PRIVATE
-        CUMETAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        $<$<BOOL:${CUMETAL_EMBED_SOURCE_DIR}>:CUMETAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}">
 )
 
 add_executable(cumetal-air-emitter
@@ -495,7 +504,7 @@ target_compile_options(cumetalc
 
 target_compile_definitions(cumetalc
     PRIVATE
-        CUMETAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        $<$<BOOL:${CUMETAL_EMBED_SOURCE_DIR}>:CUMETAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}">
         CUMETAL_VERSION_STRING="${PROJECT_VERSION}"
 )
 
@@ -512,7 +521,7 @@ target_compile_options(cumetal
 
 target_compile_definitions(cumetal
     PRIVATE
-        CUMETAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        $<$<BOOL:${CUMETAL_EMBED_SOURCE_DIR}>:CUMETAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}">
         CUMETAL_VERSION_STRING="${PROJECT_VERSION}"
 )
 

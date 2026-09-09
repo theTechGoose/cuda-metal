@@ -51,7 +51,8 @@ step "Configure (Release)"
 cmake -S . -B "$BUILD_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCUMETAL_BUILD_TESTS=ON \
-    -DCUMETAL_ENABLE_BINARY_SHIM=OFF
+    -DCUMETAL_ENABLE_BINARY_SHIM=OFF \
+    -DCUMETAL_EMBED_SOURCE_DIR=OFF
 
 cache="${BUILD_DIR}/CMakeCache.txt"
 
@@ -60,6 +61,11 @@ cache="${BUILD_DIR}/CMakeCache.txt"
 # only in Release, so a release must assert both rather than trust the default.
 grep -q '^CMAKE_BUILD_TYPE:STRING=Release$' "$cache" \
     || die "CMAKE_BUILD_TYPE is not Release in $cache"
+
+# The shipped binaries must not be able to reach this checkout at all. The staged
+# tree is grepped for the path later; this is the reason it will not be there.
+grep -q '^CUMETAL_EMBED_SOURCE_DIR:BOOL=OFF$' "$cache" \
+    || die "CUMETAL_EMBED_SOURCE_DIR is not OFF in $cache"
 grep -q '^CUMETAL_ENABLE_BINARY_SHIM:BOOL=OFF$' "$cache" \
     || die "CUMETAL_ENABLE_BINARY_SHIM is not OFF in $cache -- refusing to ship the libcuda.dylib alias"
 
