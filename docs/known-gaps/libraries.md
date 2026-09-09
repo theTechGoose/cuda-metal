@@ -94,10 +94,18 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   one.
 
   What remains absent is narrower than it once was, and the boundaries are
-  refusals rather than silent approximations. Recurrent projection (LSTMP,
-  PyTorch's `proj_size != 0`) is unsupported at every generation, and EVERY
-  nonzero `projSize` is refused -- including `projSize == hiddenSize`, which is
-  a learned map rather than a no-op. `CUDNN_SKIP_INPUT` and the three
+  refusals rather than silent approximations. Recurrent projection (LSTMP) is
+  unsupported at every generation. Note that `projSize` is not a boolean:
+  cuDNN's contract is that the legal range is `1..hiddenSize` and that
+  "It is legal to set projSize equal to hiddenSize, however, in this case, the
+  recurrent projection feature is disabled", with real cuDNN returning
+  `BAD_PARAM` for `projSize == 0`. So `projSize == hiddenSize` is ACCEPTED here
+  (projection disabled), `projSize == 0` returns `BAD_PARAM`, and any other
+  width is refused as an unimplemented projection. That distinction is
+  load-bearing rather than pedantic: PyTorch's
+  `aten/src/ATen/cudnn/Descriptors.h` passes `proj_size ? proj_size :
+  hidden_size`, so an ordinary non-projected `torch.nn.LSTM` arrives with
+  `projSize == hiddenSize`. `CUDNN_SKIP_INPUT` and the three
   non-double bias modes are refused as well; cuDNN reports `nbDims = 0` for the
   weights those modes make absent, and this implementation has no such path, so
   accepting one would leave the weight query describing a matrix that is not

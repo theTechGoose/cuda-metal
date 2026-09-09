@@ -87,8 +87,13 @@ full NVIDIA library implementations.
   framework actually calls (`cudnnSetRNNDescriptor_v8`, `cudnnRNNForward`, the
   RNN data descriptor, and the weight-space and weight-parameter queries).
   Configurations the engine does not implement are refused at descriptor set
-  rather than silently ignored: every nonzero `projSize`, `CUDNN_SKIP_INPUT`,
-  and the three non-double bias modes. That refusal is load-bearing beyond the
+  rather than silently ignored: an unimplemented recurrent projection,
+  `CUDNN_SKIP_INPUT`, and the three non-double bias modes. `projSize` follows
+  cuDNN's contract rather than an intuition about it — `projSize == hiddenSize`
+  means projection disabled and is accepted, `projSize == 0` is outside the
+  legal range and returns `BAD_PARAM`, and any other width is a projection this
+  engine does not implement. PyTorch passes `proj_size ? proj_size :
+  hidden_size`, so an ordinary LSTM arrives with `projSize == hiddenSize`. That refusal is load-bearing beyond the
   arithmetic — cuDNN reports `nbDims = 0` for weights those modes make absent,
   and this implementation has no such path, so accepting one would leave the
   weight query describing a matrix that is not there.

@@ -35,7 +35,7 @@ int main(void) {
                                  CUDNN_RNN_DOUBLE_BIAS, CUDNN_UNIDIRECTIONAL,
                                  CUDNN_LINEAR_INPUT, CUDNN_DATA_FLOAT,
                                  CUDNN_DATA_FLOAT, CUDNN_DEFAULT_MATH,
-                                 8, 8, 0, 2, NULL, 0) != CUDNN_STATUS_SUCCESS) {
+                                 8, 8, /*projSize=*/8, 2, NULL, 0) != CUDNN_STATUS_SUCCESS) {
         fprintf(stderr, "FAIL: cudnnSetRNNDescriptor_v8\n");
         return 1;
     }

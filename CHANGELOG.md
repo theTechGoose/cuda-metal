@@ -6,6 +6,30 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cudnnSetRNNDescriptor_v8` no longer refuses every PyTorch LSTM.** `projSize` is not a
+  boolean, and 0.6.6 through 0.6.9 treated it as one. cuDNN's contract: the legal range is
+  `1..hiddenSize`, and — verbatim — "It is legal to set projSize equal to hiddenSize, however, in
+  this case, the recurrent projection feature is disabled." Real cuDNN returns `BAD_PARAM` for
+  `projSize == 0`, measured on 9.20 across the range.
+
+  0.6.6 refused *every* nonzero `projSize`, on the stated reasoning that `projSize == hiddenSize`
+  is "a learned `[hiddenSize, hiddenSize]` map, not a no-op". That reasoning was wrong, and it is
+  the encoding for projection *disabled*. It matters because PyTorch translates at the call site —
+  `aten/src/ATen/cudnn/Descriptors.h` passes `proj_size ? proj_size : hidden_size` — so an
+  ordinary, non-projected `torch.nn.LSTM` arrives with `projSize == hiddenSize`. Every one of them
+  was refused with `CUDNN_STATUS_NOT_SUPPORTED`, which made the entire v8 RNN path unreachable
+  from the framework it was built for.
+
+  Now: `projSize == hiddenSize` is accepted (projection disabled), `projSize == 0` returns
+  `BAD_PARAM` matching real cuDNN, and any other width is refused as an unimplemented projection.
+  Accepting 0 was itself a divergence in the permissive direction — code that ran on CuMetal
+  died with `BAD_PARAM` on real hardware, which is the failure this project exists to prevent.
+
+  Found by a consumer running the same source against a real RTX 4090, whose first attempt failed
+  at the descriptor and who then swept `projSize` rather than guessing.
+
 ## [0.6.9] - 2026-09-09
 
 ### Fixed

@@ -124,7 +124,7 @@ int main() {
                                         CUDNN_RNN_DOUBLE_BIAS, CUDNN_UNIDIRECTIONAL,
                                         CUDNN_LINEAR_INPUT, CUDNN_DATA_FLOAT,
                                         CUDNN_DATA_FLOAT, CUDNN_DEFAULT_MATH,
-                                        kInput, kHidden, 0, kLayers, nullptr, 0),
+                                        kInput, kHidden, /*projSize=*/kHidden, kLayers, nullptr, 0),
                "cudnnSetRNNDescriptor_v8")) {
         return 1;
     }

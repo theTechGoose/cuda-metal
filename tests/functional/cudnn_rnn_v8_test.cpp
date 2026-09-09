@@ -56,7 +56,7 @@ int main() {
                                         CUDNN_RNN_DOUBLE_BIAS, CUDNN_UNIDIRECTIONAL,
                                         CUDNN_LINEAR_INPUT, CUDNN_DATA_FLOAT,
                                         CUDNN_DATA_FLOAT, CUDNN_DEFAULT_MATH,
-                                        kInput, kHidden, 0, kLayers, nullptr, 0),
+                                        kInput, kHidden, /*projSize=*/kHidden, kLayers, nullptr, 0),
                "cudnnSetRNNDescriptor_v8")) {
         return 1;
     }
@@ -84,7 +84,7 @@ int main() {
             const cudnnStatus_t st = cudnnSetRNNDescriptor_v8(
                 probe, CUDNN_RNN_ALGO_STANDARD, CUDNN_LSTM, u.bm, CUDNN_UNIDIRECTIONAL,
                 u.im, CUDNN_DATA_FLOAT, CUDNN_DATA_FLOAT, CUDNN_DEFAULT_MATH,
-                kInput, kHidden, 0, kLayers, nullptr, 0);
+                kInput, kHidden, /*projSize=*/kHidden, kLayers, nullptr, 0);
             cudnnDestroyRNNDescriptor(probe);
             if (st == CUDNN_STATUS_SUCCESS) {
                 std::fprintf(stderr,
@@ -274,23 +274,36 @@ int main() {
                      "single-timestep calls carrying state\n", mismatches, kSeq);
         return 1;
     }
-
-    // Projection must be refused, not ignored: a silently unprojected LSTM
-    // would return confidently wrong output. EVERY nonzero projSize is a
-    // refusal, including projSize == hiddenSize -- that is a learned
-    // [hiddenSize, hiddenSize] map, not a no-op, and an earlier guard let it
-    // through and then ignored it.
-    const int refuse_proj[] = {kHidden / 2, kHidden, kHidden - 1, 1};  // == kHidden included on purpose
-    for (int proj : refuse_proj) {
-        if (cudnnSetRNNDescriptor_v8(rnn, CUDNN_RNN_ALGO_STANDARD, CUDNN_LSTM,
-                                     CUDNN_RNN_DOUBLE_BIAS, CUDNN_UNIDIRECTIONAL,
-                                     CUDNN_LINEAR_INPUT, CUDNN_DATA_FLOAT,
-                                     CUDNN_DATA_FLOAT, CUDNN_DEFAULT_MATH,
-                                     kInput, kHidden, proj, kLayers, nullptr, 0)
-            != CUDNN_STATUS_NOT_SUPPORTED) {
+    // projSize is not a boolean. cuDNN: "It is legal to set projSize equal to
+    // hiddenSize, however, in this case, the recurrent projection feature is
+    // disabled." So the legal range is 1..hiddenSize, DISABLED is encoded as
+    // projSize == hiddenSize, and real cuDNN returns BAD_PARAM for 0 (measured
+    // on 9.20 across the range).
+    //
+    // The load-bearing row is projSize == hiddenSize, because PyTorch's
+    // aten/src/ATen/cudnn/Descriptors.h passes `proj_size ? proj_size :
+    // hidden_size` -- an ordinary non-projected torch.nn.LSTM arrives with
+    // projSize == hiddenSize. A guard refusing every nonzero projSize refuses
+    // every PyTorch LSTM, which is what 0.6.6 through 0.6.9 did. Keep that row
+    // asserted as ACCEPTED; it is the one that was broken.
+    const struct { int proj; cudnnStatus_t want; const char* why; } proj_rows[] = {
+        {0,            CUDNN_STATUS_BAD_PARAM,     "0 is outside the legal range"},
+        {kHidden,      CUDNN_STATUS_SUCCESS,       "== hiddenSize disables projection"},
+        {1,            CUDNN_STATUS_NOT_SUPPORTED, "a genuine projection"},
+        {kHidden / 2,  CUDNN_STATUS_NOT_SUPPORTED, "a genuine projection"},
+        {kHidden - 1,  CUDNN_STATUS_NOT_SUPPORTED, "a genuine projection"},
+        {kHidden + 1,  CUDNN_STATUS_NOT_SUPPORTED, "wider than hiddenSize"},
+    };
+    for (const auto& row : proj_rows) {
+        const cudnnStatus_t got = cudnnSetRNNDescriptor_v8(
+            rnn, CUDNN_RNN_ALGO_STANDARD, CUDNN_LSTM, CUDNN_RNN_DOUBLE_BIAS,
+            CUDNN_UNIDIRECTIONAL, CUDNN_LINEAR_INPUT, CUDNN_DATA_FLOAT,
+            CUDNN_DATA_FLOAT, CUDNN_DEFAULT_MATH, kInput, kHidden, row.proj,
+            kLayers, nullptr, 0);
+        if (got != row.want) {
             std::fprintf(stderr,
-                         "FAIL: proj_size %d was accepted; every nonzero projection "
-                         "must be refused, not silently ignored\n", proj);
+                         "FAIL: projSize %d returned %d, expected %d (%s)\n",
+                         row.proj, (int)got, (int)row.want, row.why);
             return 1;
         }
     }
@@ -306,7 +319,7 @@ int main() {
 
     std::printf("PASS: v8 RNN input=%d hidden=%d layers=%d batch=%d — %d single-timestep "
                 "calls with carried state match one full-sequence call, weight space %zu B, "
-                "weight params land in it, every nonzero projection refused\n",
+                "weight params land in it, the projSize contract honoured\n",
                 kInput, kHidden, kLayers, kBatch, kSeq, weight_bytes);
     return 0;
 }

@@ -3131,17 +3131,34 @@ cudnnStatus_t cudnnSetRNNDescriptor_v8(cudnnRNNDescriptor_t rnnDesc,
         (dropoutDesc && dropoutDesc->dropout != 0.0f)) {
         return CUDNN_STATUS_NOT_SUPPORTED;
     }
-    // Recurrent projection (LSTMP) changes the recurrent input width and the
-    // weight space, and the bounded engine does not implement it. Refuse rather
-    // than ignore the parameter: a silently unprojected LSTM would produce
-    // confidently wrong output.
+    // projSize is NOT "0 means no projection". cuDNN's contract, verbatim:
     //
-    // ANY nonzero projSize is a refusal, including projSize == hiddenSize. That
-    // is not a no-op projection -- it is a learned [hiddenSize, hiddenSize] map
-    // that the weight space has to carry and the recurrence has to apply. An
-    // earlier form of this guard let it through and then ignored it, which is
-    // the exact failure the paragraph above says it is preventing.
-    if (projSize != 0) {
+    //   "The size of the LSTM cell output after the recurrent projection. This
+    //    value should not be larger than hiddenSize. It is legal to set
+    //    projSize equal to hiddenSize, however, in this case, the recurrent
+    //    projection feature is disabled."
+    //
+    // So the legal range is 1..hiddenSize and DISABLED is encoded as
+    // projSize == hiddenSize. Real cuDNN returns BAD_PARAM for projSize == 0,
+    // measured on cuDNN 9.20 across the whole range.
+    //
+    // This matters far more than it looks. PyTorch translates at the call site
+    // -- aten/src/ATen/cudnn/Descriptors.h passes
+    //
+    //   proj_size ? proj_size : hidden_size
+    //
+    // -- so an ordinary non-projected torch.nn.LSTM arrives here with
+    // projSize == hiddenSize, not 0. A guard that refuses every nonzero
+    // projSize refuses every PyTorch LSTM, projected or not, which is what
+    // 0.6.6 through 0.6.9 did.
+    if (projSize == 0) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+    if (projSize != hiddenSize) {
+        // Either a genuine projection (projSize < hiddenSize), which the
+        // bounded engine does not implement, or an illegal width above
+        // hiddenSize. Refuse rather than ignore: a silently unprojected LSTM
+        // returns confidently wrong output.
         return CUDNN_STATUS_NOT_SUPPORTED;
     }
     rnnDesc->hiddenSize = hiddenSize;
