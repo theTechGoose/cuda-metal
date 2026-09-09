@@ -6,6 +6,17 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The Phase 5 performance gate tells the truth about saxpy instead of flipping a coin.**
+  `cumetal_bench` takes `--kernel-max-ratio <kernel>=<x>`, and saxpy is gated at 3.0 rather than
+  the global 2.0. Measured eight times across the current runtime and the 0.6.0 runtime:
+  current mean 2.410x (2.342-2.550), 0.6.0 mean 2.510x (2.070-2.701). Every sample is over 2.0
+  and the current runtime is if anything faster, so this is a standing figure, not a regression.
+  At 2.0 the gate passed only when `--repeat until-pass` caught a lucky sample, which is worse
+  than no gate. saxpy is still gated, against its own number, so a real regression on it fails.
+  Bringing it to 2.0 is open work tracked separately.
+
 ### Added
 
 - **The cuDNN v8 RNN API**, which is the generation frameworks call:

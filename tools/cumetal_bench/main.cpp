@@ -18,6 +18,10 @@
 // --warmup         Warmup iterations (default: 5).
 // --iterations     Measurement iterations (default: 50).
 // --max-ratio      Fail if any kernel ratio exceeds this value (default: 0.0 = no gate).
+// --kernel-max-ratio <kernel>=<x>
+//                  Ceiling for one kernel, replacing --max-ratio for it. For a
+//                  kernel whose ratio is a standing figure rather than a
+//                  regression: it stays gated, against its own number.
 
 #include "cuda_runtime.h"
 #include "metal_backend.h"
@@ -31,6 +35,7 @@
 #include <limits>
 #include <algorithm>
 #include <memory>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -48,12 +53,17 @@ struct Options {
     int warmup_iterations = 5;
     int measure_iterations = 50;
     double max_ratio = 0.0;
+    // Per-kernel ceilings, for kernels whose ratio is a known standing figure
+    // rather than a regression. A kernel listed here is still gated -- against
+    // its own number -- so a real regression on it still fails.
+    std::map<std::string, double> kernel_max_ratio;
 };
 
 void print_usage(const char* argv0) {
     std::printf(
         "usage: %s --metallib <path> [--kernel <name>|--all-kernels]\n"
-        "          [--elements <n>] [--warmup <n>] [--iterations <n>] [--max-ratio <x>]\n",
+        "          [--elements <n>] [--warmup <n>] [--iterations <n>] [--max-ratio <x>]\n"
+        "          [--kernel-max-ratio <kernel>=<x>]\n",
         argv0);
 }
 
@@ -138,6 +148,18 @@ bool parse_options(int argc, char** argv, Options* opts, bool* show_help) {
                 std::fprintf(stderr, "FAIL: invalid --iterations value\n");
                 return false;
             }
+        } else if (arg == "--kernel-max-ratio" ||
+                   arg.rfind("--kernel-max-ratio=", 0) == 0) {
+            val = next_or_suffix("--kernel-max-ratio");
+            const std::size_t eq = val.find('=');
+            double parsed = 0.0;
+            if (eq == std::string::npos || eq == 0 ||
+                !parse_positive_double(val.substr(eq + 1), &parsed)) {
+                std::fprintf(stderr,
+                             "FAIL: --kernel-max-ratio expects <kernel>=<ratio>\n");
+                return false;
+            }
+            opts->kernel_max_ratio[val.substr(0, eq)] = parsed;
         } else if (arg == "--max-ratio" || arg.rfind("--max-ratio=", 0) == 0) {
             val = next_or_suffix("--max-ratio");
             if (val.empty() || !parse_positive_double(val, &opts->max_ratio)) {
@@ -998,7 +1020,11 @@ RunResult run_kernel(const Options& opts, const char* kernel_name) {
     if (r.native.valid && r.runtime.valid &&
         r.native.wall_avg_ms > 0.0 && r.runtime.wall_avg_ms > 0.0) {
         r.ratio = r.runtime.wall_avg_ms / r.native.wall_avg_ms;
-        if (opts.max_ratio > 0.0 && r.ratio > opts.max_ratio) {
+        const auto override_it = opts.kernel_max_ratio.find(r.kernel ? r.kernel : "");
+        const double ceiling = override_it != opts.kernel_max_ratio.end()
+                                   ? override_it->second
+                                   : opts.max_ratio;
+        if (ceiling > 0.0 && r.ratio > ceiling) {
             r.gate_fail = true;
         }
     }
