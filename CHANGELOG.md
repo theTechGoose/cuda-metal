@@ -6,6 +6,8 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-09
+
 ### Fixed
 
 - **A deferred pointer restore no longer runs on another thread's copy, which corrupted data
