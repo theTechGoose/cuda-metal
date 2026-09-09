@@ -1380,6 +1380,18 @@ struct PendingRestore {
     void* host_dst = nullptr;
     std::size_t count = 0;
     std::uint64_t seq = 0;
+    // The thread that issued the copy, and the only one allowed to run this
+    // restore. The restore is a read-modify-write of the destination, so a
+    // thread that ran another thread's entry could stage those bytes, have the
+    // owner's NEXT blit land underneath it, and write the pre-blit content back
+    // -- destroying data the copy had correctly delivered. Sharing a stream
+    // across threads (PhysX drives its pipeline from four workers on one
+    // stream) made every synchronization a chance to do exactly that.
+    //
+    // The cost is that a copy issued on one thread and awaited only on another
+    // keeps its device pointers, as it did before any of this existed. That is
+    // the rarer case and it is not corruption.
+    std::thread::id owner = std::this_thread::get_id();
 };
 
 struct RestoreBook {
@@ -1416,8 +1428,10 @@ void apply_pending_restores(const void* stream_key, std::uint64_t up_to_seq) {
         if (it == book.by_stream.end()) return;
         std::vector<PendingRestore>& pending = it->second;
         std::vector<PendingRestore> keep;
+        const std::thread::id self = std::this_thread::get_id();
         for (const PendingRestore& entry : pending) {
-            (entry.seq <= up_to_seq ? due : keep).push_back(entry);
+            const bool mine_and_covered = entry.owner == self && entry.seq <= up_to_seq;
+            (mine_and_covered ? due : keep).push_back(entry);
         }
         pending.swap(keep);
         if (pending.empty()) {
@@ -1444,17 +1458,29 @@ void forget_stream_restores(const void* stream_key) {
     book.seq_by_stream.erase(stream_key);
 }
 
-void apply_all_pending_restores() {
-    std::vector<const void*> keys;
-    {
-        RestoreBook& book = restore_book();
-        std::lock_guard<std::mutex> lock(book.mutex);
-        for (const auto& entry : book.by_stream) {
-            if (!entry.second.empty()) keys.push_back(entry.first);
+// The bound a drain may safely use is the stream's sequence as it stood BEFORE
+// the synchronization began: those blits are the ones the wait is about to
+// cover. Draining to "everything" instead claims entries another thread noted
+// while we were waiting, whose blits have NOT landed -- the restore then reads
+// that destination early, and writes its stale snapshot back over the bytes the
+// blit delivers a moment later. With several threads on one stream (PhysX drives
+// its pipeline from four workers) that surfaces as a destination still holding
+// whatever the reader put there before the copy.
+std::vector<std::pair<const void*, std::uint64_t>> snapshot_restore_bounds() {
+    std::vector<std::pair<const void*, std::uint64_t>> bounds;
+    RestoreBook& book = restore_book();
+    std::lock_guard<std::mutex> lock(book.mutex);
+    for (const auto& entry : book.by_stream) {
+        if (!entry.second.empty()) {
+            bounds.emplace_back(entry.first, entry.second.back().seq);
         }
     }
-    for (const void* key : keys) {
-        apply_pending_restores(key, std::numeric_limits<std::uint64_t>::max());
+    return bounds;
+}
+
+void apply_restore_bounds(const std::vector<std::pair<const void*, std::uint64_t>>& bounds) {
+    for (const auto& bound : bounds) {
+        apply_pending_restores(bound.first, bound.second);
     }
 }
 
@@ -4305,12 +4331,13 @@ cudaError_t cudaDeviceSynchronize(void) {
     }
 
     std::string error;
+    const auto bounds = snapshot_restore_bounds();
     const cudaError_t status = cumetal::metal_backend::synchronize(&error);
     const cudaError_t pending_launch_error = take_pending_launch_error();
     if (status != cudaSuccess) {
         return fail(status);
     }
-    apply_all_pending_restores();
+    apply_restore_bounds(bounds);
     return fail(pending_launch_error);
 }
 
@@ -4471,9 +4498,10 @@ cudaError_t cudaStreamDestroy(cudaStream_t stream) {
     }
 
     std::string error;
+    const std::uint64_t bound = restore_seq_of_stream(backend_stream.get());
     const cudaError_t status = cumetal::metal_backend::destroy_stream(backend_stream, &error);
     if (status == cudaSuccess) {
-        apply_pending_restores(backend_stream.get(), std::numeric_limits<std::uint64_t>::max());
+        apply_pending_restores(backend_stream.get(), bound);
     }
     forget_stream_restores(backend_stream.get());
     delete stream;
@@ -4493,9 +4521,10 @@ cudaError_t cudaStreamSynchronize(cudaStream_t stream) {
     }
 
     std::string error;
+    const std::uint64_t bound = restore_seq_of_stream(backend_stream.get());
     const cudaError_t status = cumetal::metal_backend::stream_synchronize(backend_stream, &error);
     if (status == cudaSuccess) {
-        apply_pending_restores(backend_stream.get(), std::numeric_limits<std::uint64_t>::max());
+        apply_pending_restores(backend_stream.get(), bound);
     }
     return fail(status);
 }
@@ -4515,6 +4544,8 @@ cudaError_t cudaStreamQuery(cudaStream_t stream) {
     std::uint64_t tail_ticket = 0;
     bool complete = true;
     std::string error;
+    // read before the ticket, so the bound cannot include a blit noted after it
+    const std::uint64_t bound = restore_seq_of_stream(backend_stream.get());
     const cudaError_t tail_status =
         cumetal::metal_backend::stream_tail_ticket(backend_stream, &tail_ticket, &error);
     if (tail_status != cudaSuccess) {
@@ -4526,7 +4557,7 @@ cudaError_t cudaStreamQuery(cudaStream_t stream) {
         return fail(query_status);
     }
     if (complete) {
-        apply_pending_restores(backend_stream.get(), std::numeric_limits<std::uint64_t>::max());
+        apply_pending_restores(backend_stream.get(), bound);
     }
     return fail(complete ? cudaSuccess : cudaErrorNotReady);
 }

@@ -6,6 +6,34 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A deferred pointer restore no longer runs on another thread's copy, which corrupted data
+  when threads shared a stream.** 0.6.1 deferred the embedded-pointer restore of a
+  device-to-host blit to the next synchronization covering it, and let whichever thread
+  synchronized run every restore pending on that stream. The restore is a read-modify-write
+  of the destination, so a thread running another thread's entry could stage those bytes,
+  have the owner's *next* blit land underneath it, and write the pre-blit content back --
+  destroying data the copy had correctly delivered. It needed a shared stream to happen, and
+  PhysX drives its GPU pipeline from several workers on one stream, which is the case
+  0.6.1 shipped broken: four threads on the legacy stream, each with private buffers, and
+  a destination still holding the reader's own fill pattern after a successful
+  `cudaStreamSynchronize` (9 of 10 runs; 0 of 10 on 0.6.0, and 0 of 10 with the restore
+  book disabled). A restore now runs only on the thread that issued its copy, and every
+  drain is bounded by the stream's sequence as it stood *before* the wait began rather than
+  by "everything pending". A copy issued on one thread and awaited only on another keeps its
+  device pointers, as it did before 0.6.1 -- the rarer case, and not corruption.
+  `tests/functional/multi_worker_stream_stress_test.cpp` is the reproduction: four workers
+  across four phases -- own stream, cross-stream event, allocation churn, and the shared
+  legacy stream -- each checking its own results byte for byte over 64 rounds.
+
+### Added
+
+- **`scripts/mac_ctest.sh`** builds a target and runs a ctest selection on the Mac, so an
+  investigation from a container can get an answer without a full release build.
+  `CUMETAL_CTEST_REPEAT=N` re-runs the selection, which race hunting needs: one clean pass
+  of a concurrency test proves nothing.
+
 ## [0.6.1] - 2026-09-08
 
 ### Fixed
