@@ -6,6 +6,24 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-09-09
+
+### Fixed
+
+- **A tensor descriptor reports the rank it was set with, not always 4.**
+  `cudnnGetTensorNdDescriptor` returned `*nbDims = 4` unconditionally: storage here is a fixed
+  4-D struct and the getter reported the storage rather than what the caller set. Nothing
+  reached that until `cudnnGetRNNWeightParams`, which is the first API in this shim that hands
+  out 3-D descriptors — real cuDNN reports rank 3 for an RNN weight matrix and bias, and a
+  framework that reads rank 4 back from one sees a shape its own parameter does not have,
+  surfacing it as an assertion deep in its own code rather than as a clean refusal here. The
+  v8 test now asserts rank and dims for every pseudo-layer and gate, matrix and bias, instead
+  of only checking that the reported slice lands inside the weight space.
+
+  Found by running transcription-box's own `weights_dump.c` against 0.6.6: it printed
+  `nbDims=4 dims=[1,640,640,1]` where NVIDIA prints `nbDims=3 dims=[1,640,640]`. A consumer's
+  diffable dump reached a getter none of this project's tests had.
+
 ## [0.6.6] - 2026-09-09
 
 ### Fixed
