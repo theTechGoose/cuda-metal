@@ -1,0 +1,224 @@
+#include "cudnn.h"
+
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
+// The cuDNN v8 RNN path, exercised in the shape NVIDIA Parakeet's RNNT/TDT
+// prediction network actually uses. From the shipped parakeet-tdt-0.6b config:
+// pred_hidden 640, pred_rnn_layers 2, no rnn_hidden_size, so NeMo's
+//   proj_size = pred_n_hidden if pred_n_hidden < rnn_hidden_size else 0
+// leaves proj_size 0 -- an ordinary 2-layer unidirectional LSTM. Greedy decode
+// then calls it ONE TIMESTEP AT A TIME carrying (h, c) forward, which is the
+// part the v7 full-sequence API never had to serve.
+//
+// The test's claim is that stepping the sequence one timestep at a time with
+// externally carried state produces exactly what one full-sequence call
+// produces. That is the property a decoder depends on, and it is checkable
+// without any model in the loop.
+
+namespace {
+
+constexpr int kInput = 8;
+constexpr int kHidden = 8;
+constexpr int kLayers = 2;
+constexpr int kBatch = 3;
+constexpr int kSeq = 5;
+
+bool check(cudnnStatus_t s, const char* what) {
+    if (s != CUDNN_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: %s -> %d\n", what, static_cast<int>(s));
+        return false;
+    }
+    return true;
+}
+
+float deterministic(int i) {
+    return 0.05f * static_cast<float>((i * 37) % 21 - 10);
+}
+
+}  // namespace
+
+int main() {
+    cudnnHandle_t handle = nullptr;
+    if (!check(cudnnCreate(&handle), "cudnnCreate")) return 1;
+
+    cudnnRNNDescriptor_t rnn = nullptr;
+    if (!check(cudnnCreateRNNDescriptor(&rnn), "cudnnCreateRNNDescriptor")) return 1;
+    if (!check(cudnnSetRNNDescriptor_v8(rnn, CUDNN_RNN_ALGO_STANDARD, CUDNN_LSTM,
+                                        CUDNN_RNN_DOUBLE_BIAS, CUDNN_UNIDIRECTIONAL,
+                                        CUDNN_LINEAR_INPUT, CUDNN_DATA_FLOAT,
+                                        CUDNN_DATA_FLOAT, CUDNN_DEFAULT_MATH,
+                                        kInput, kHidden, 0, kLayers, nullptr, 0),
+               "cudnnSetRNNDescriptor_v8")) {
+        return 1;
+    }
+
+    size_t weight_bytes = 0;
+    if (!check(cudnnGetRNNWeightSpaceSize(handle, rnn, &weight_bytes),
+               "cudnnGetRNNWeightSpaceSize")) {
+        return 1;
+    }
+    std::vector<float> weights(weight_bytes / sizeof(float));
+    for (std::size_t i = 0; i < weights.size(); ++i) {
+        weights[i] = deterministic(static_cast<int>(i));
+    }
+
+    // The weight-params query has to describe the same layout the forward reads,
+    // because a framework fills the space through it. Walk every pseudo-layer
+    // and gate and confirm each reported slice lands inside the space.
+    for (int layer = 0; layer < kLayers; ++layer) {
+        for (int id = 0; id < 8; ++id) {
+            cudnnTensorDescriptor_t mDesc = nullptr, bDesc = nullptr;
+            void* mAddr = nullptr; void* bAddr = nullptr;
+            if (!check(cudnnCreateTensorDescriptor(&mDesc), "createTensor m") ||
+                !check(cudnnCreateTensorDescriptor(&bDesc), "createTensor b") ||
+                !check(cudnnGetRNNWeightParams(handle, rnn, layer, weight_bytes,
+                                               weights.data(), id, mDesc, &mAddr,
+                                               bDesc, &bAddr),
+                       "cudnnGetRNNWeightParams")) {
+                return 1;
+            }
+            const float* base = weights.data();
+            const float* m = static_cast<const float*>(mAddr);
+            const float* b = static_cast<const float*>(bAddr);
+            if (m < base || m >= base + weights.size() ||
+                b < base || b >= base + weights.size()) {
+                std::fprintf(stderr,
+                             "FAIL: layer %d id %d reported a slice outside the weight "
+                             "space\n", layer, id);
+                return 1;
+            }
+            cudnnDestroyTensorDescriptor(mDesc);
+            cudnnDestroyTensorDescriptor(bDesc);
+        }
+    }
+
+    std::vector<float> x(static_cast<std::size_t>(kSeq) * kBatch * kInput);
+    for (std::size_t i = 0; i < x.size(); ++i) x[i] = deterministic(static_cast<int>(i) + 3);
+    const std::size_t state_elems = static_cast<std::size_t>(kLayers) * kBatch * kHidden;
+
+    cudnnTensorDescriptor_t hDesc = nullptr, cDesc = nullptr;
+    if (!check(cudnnCreateTensorDescriptor(&hDesc), "createTensor h") ||
+        !check(cudnnCreateTensorDescriptor(&cDesc), "createTensor c")) {
+        return 1;
+    }
+    const int state_dims[3] = {kLayers, kBatch, kHidden};
+    const int state_strides[3] = {kBatch * kHidden, kHidden, 1};
+    if (!check(cudnnSetTensorNdDescriptor(hDesc, CUDNN_DATA_FLOAT, 3, state_dims,
+                                          state_strides), "setTensorNd h") ||
+        !check(cudnnSetTensorNdDescriptor(cDesc, CUDNN_DATA_FLOAT, 3, state_dims,
+                                          state_strides), "setTensorNd c")) {
+        return 1;
+    }
+
+    auto make_data = [&](int seq, int vector, cudnnRNNDataDescriptor_t* out) {
+        std::vector<int> lengths(kBatch, seq);
+        return cudnnCreateRNNDataDescriptor(out) == CUDNN_STATUS_SUCCESS &&
+               cudnnSetRNNDataDescriptor(*out, CUDNN_DATA_FLOAT,
+                                         CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_UNPACKED,
+                                         seq, kBatch, vector, lengths.data(),
+                                         nullptr) == CUDNN_STATUS_SUCCESS;
+    };
+
+    // (a) one full-sequence call
+    cudnnRNNDataDescriptor_t xFull = nullptr, yFull = nullptr;
+    if (!make_data(kSeq, kInput, &xFull) || !make_data(kSeq, kHidden, &yFull)) {
+        std::fprintf(stderr, "FAIL: building the full-sequence data descriptors\n");
+        return 1;
+    }
+    std::vector<float> y_full(static_cast<std::size_t>(kSeq) * kBatch * kHidden, 0.0f);
+    std::vector<float> hy_full(state_elems, 0.0f), cy_full(state_elems, 0.0f);
+    if (!check(cudnnRNNForward(handle, rnn, CUDNN_FWD_MODE_INFERENCE, nullptr,
+                               xFull, x.data(), yFull, y_full.data(),
+                               hDesc, nullptr, hy_full.data(),
+                               cDesc, nullptr, cy_full.data(),
+                               weight_bytes, weights.data(), 0, nullptr, 0, nullptr),
+               "cudnnRNNForward (full sequence)")) {
+        return 1;
+    }
+
+    // (b) the same sequence one timestep at a time, carrying state -- what a
+    //     greedy RNNT decoder does.
+    cudnnRNNDataDescriptor_t xStep = nullptr, yStep = nullptr;
+    if (!make_data(1, kInput, &xStep) || !make_data(1, kHidden, &yStep)) {
+        std::fprintf(stderr, "FAIL: building the single-step data descriptors\n");
+        return 1;
+    }
+    std::vector<float> h_state(state_elems, 0.0f), c_state(state_elems, 0.0f);
+    std::vector<float> h_next(state_elems, 0.0f), c_next(state_elems, 0.0f);
+    std::vector<float> y_step(static_cast<std::size_t>(kSeq) * kBatch * kHidden, 0.0f);
+    for (int t = 0; t < kSeq; ++t) {
+        std::vector<float> y_one(static_cast<std::size_t>(kBatch) * kHidden, 0.0f);
+        if (!check(cudnnRNNForward(handle, rnn, CUDNN_FWD_MODE_INFERENCE, nullptr,
+                                   xStep, x.data() + static_cast<std::size_t>(t) * kBatch * kInput,
+                                   yStep, y_one.data(),
+                                   hDesc, h_state.data(), h_next.data(),
+                                   cDesc, c_state.data(), c_next.data(),
+                                   weight_bytes, weights.data(), 0, nullptr, 0, nullptr),
+                   "cudnnRNNForward (single step)")) {
+            return 1;
+        }
+        std::memcpy(y_step.data() + static_cast<std::size_t>(t) * kBatch * kHidden,
+                    y_one.data(), y_one.size() * sizeof(float));
+        h_state = h_next;
+        c_state = c_next;
+    }
+
+    int mismatches = 0;
+    for (std::size_t i = 0; i < y_full.size(); ++i) {
+        if (std::fabs(y_full[i] - y_step[i]) > 1e-5f) {
+            if (mismatches < 5) {
+                std::fprintf(stderr,
+                             "FAIL: element %zu full=%.7f stepped=%.7f\n",
+                             i, y_full[i], y_step[i]);
+            }
+            ++mismatches;
+        }
+    }
+    for (std::size_t i = 0; i < state_elems; ++i) {
+        if (std::fabs(hy_full[i] - h_state[i]) > 1e-5f ||
+            std::fabs(cy_full[i] - c_state[i]) > 1e-5f) {
+            if (mismatches < 5) {
+                std::fprintf(stderr,
+                             "FAIL: final state %zu h full=%.7f stepped=%.7f, "
+                             "c full=%.7f stepped=%.7f\n",
+                             i, hy_full[i], h_state[i], cy_full[i], c_state[i]);
+            }
+            ++mismatches;
+        }
+    }
+    if (mismatches != 0) {
+        std::fprintf(stderr,
+                     "FAIL: %d values differ between one full-sequence call and %d "
+                     "single-timestep calls carrying state\n", mismatches, kSeq);
+        return 1;
+    }
+
+    // Projection must be refused, not ignored: a silently unprojected LSTM
+    // would return confidently wrong output.
+    if (cudnnSetRNNDescriptor_v8(rnn, CUDNN_RNN_ALGO_STANDARD, CUDNN_LSTM,
+                                 CUDNN_RNN_DOUBLE_BIAS, CUDNN_UNIDIRECTIONAL,
+                                 CUDNN_LINEAR_INPUT, CUDNN_DATA_FLOAT,
+                                 CUDNN_DATA_FLOAT, CUDNN_DEFAULT_MATH,
+                                 kInput, kHidden, kHidden / 2, kLayers, nullptr, 0)
+        != CUDNN_STATUS_NOT_SUPPORTED) {
+        std::fprintf(stderr, "FAIL: proj_size != 0 was accepted; it must be refused\n");
+        return 1;
+    }
+
+    cudnnDestroyRNNDataDescriptor(yStep);
+    cudnnDestroyRNNDataDescriptor(xStep);
+    cudnnDestroyRNNDataDescriptor(yFull);
+    cudnnDestroyRNNDataDescriptor(xFull);
+    cudnnDestroyTensorDescriptor(cDesc);
+    cudnnDestroyTensorDescriptor(hDesc);
+    cudnnDestroyRNNDescriptor(rnn);
+    cudnnDestroy(handle);
+
+    std::printf("PASS: v8 RNN — %d single-timestep calls with carried state match one "
+                "full-sequence call, weight params land in the space, projection refused\n",
+                kSeq);
+    return 0;
+}

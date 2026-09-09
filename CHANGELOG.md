@@ -8,6 +8,26 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Added
 
+- **The cuDNN v8 RNN API**, which is the generation frameworks call:
+  `cudnnSetRNNDescriptor_v8`/`_v8` getter, `cudnnRNNForward`, the RNN data descriptor
+  (`cudnnCreate`/`Set`/`Get`/`DestroyRNNDataDescriptor`), `cudnnGetRNNWeightSpaceSize`,
+  `cudnnGetRNNTempSpaceSizes`, `cudnnGetRNNWeightParams` and `cudnnBuildRNNDynamic`, plus the
+  v7 weight-layout queries `cudnnGetRNNLinLayerMatrixParams`/`BiasParams` that PyTorch's
+  pre-v8 branch uses. Previously none of these were declared, so a `torch.nn.LSTM` failed on a
+  missing entry point regardless of what the bounded v6/v7 path supported. The weight layout
+  round-trips: the engine's gate order is i,f,g,o, which is both cuDNN's `linLayerID` order and
+  PyTorch's chunk order, so the offsets `cudnnGetRNNWeightParams` reports are the offsets the
+  forward reads and a framework's weight copy lands correctly. All three data layouts are
+  accepted; batch-major is staged into sequence-major rather than teaching the engine two
+  layouts. Still the bounded CPU-backed engine, and still FP32/standard-algorithm/zero-dropout;
+  recurrent projection (`proj_size != 0`) returns `CUDNN_STATUS_NOT_SUPPORTED` rather than
+  being ignored, because a silently unprojected LSTM would return confidently wrong output.
+  Ragged batches are refused for the same reason.
+  `tests/functional/cudnn_rnn_v8_test.cpp` checks the property a decoder depends on: single
+  timestep calls carrying `(h, c)` forward produce exactly what one full-sequence call produces.
+
+### Added
+
 - **Releases ship the PhysX patch series**, under `share/cumetal/physx-patches/`, so building
   PhysX's GPU runtime against a release no longer needs the source archive fetched alongside it
   purely for these files. The patches are diffs against NVIDIA PhysX (tag `107.3-physx-5.6.1`,

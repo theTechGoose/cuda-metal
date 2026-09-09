@@ -566,6 +566,10 @@ add_executable(cumetal_cub_partition_sort_test
     cub_partition_sort_test.cpp
 )
 
+add_executable(cumetal_cudnn_rnn_v8_test
+    cudnn_rnn_v8_test.cpp
+)
+
 add_executable(cumetal_cudnn_attention_test
     cudnn_attention_test.cpp
 )
@@ -1327,6 +1331,11 @@ target_link_libraries(cumetal_cusparse_coo_test
 )
 
 target_link_libraries(cumetal_cub_partition_sort_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_cudnn_rnn_v8_test
     PRIVATE
         cumetal_runtime
 )
@@ -3434,6 +3443,11 @@ add_test(
 add_test(
     NAME functional_cub_partition_sort
     COMMAND cumetal_cub_partition_sort_test
+)
+
+add_test(
+    NAME functional_cudnn_rnn_v8
+    COMMAND cumetal_cudnn_rnn_v8_test
 )
 
 add_test(

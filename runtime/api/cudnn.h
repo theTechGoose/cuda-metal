@@ -659,6 +659,162 @@ cudnnStatus_t cudnnRNNForwardTraining(cudnnHandle_t handle,
                                        void* workSpace, size_t workSpaceSizeInBytes,
                                        void* reserveSpace, size_t reserveSpaceSizeInBytes);
 
+// ── RNN v8 API (cuDNN 8+) ─────────────────────────────────────────────────────
+//
+// The generation frameworks actually call. PyTorch selects between this and the
+// v6/v7 entry points above with the compile-time USE_CUDNN_RNN_V8_API macro,
+// which modern builds define, so a torch.nn.LSTM arrives here.
+
+typedef struct cudnnRNNDataStruct* cudnnRNNDataDescriptor_t;
+
+typedef enum cudnnForwardMode_t {
+    CUDNN_FWD_MODE_INFERENCE = 0,
+    CUDNN_FWD_MODE_TRAINING  = 1,
+} cudnnForwardMode_t;
+
+typedef enum cudnnRNNDataLayout_t {
+    CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_PACKED   = 0,
+    CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_UNPACKED = 1,
+    CUDNN_RNN_DATA_LAYOUT_BATCH_MAJOR_UNPACKED = 2,
+} cudnnRNNDataLayout_t;
+
+typedef enum cudnnRNNBiasMode_t {
+    CUDNN_RNN_NO_BIAS         = 0,
+    CUDNN_RNN_SINGLE_INP_BIAS = 1,
+    CUDNN_RNN_DOUBLE_BIAS     = 2,
+    CUDNN_RNN_SINGLE_REC_BIAS = 3,
+} cudnnRNNBiasMode_t;
+
+typedef enum cudnnRNNClipMode_t {
+    CUDNN_RNN_CLIP_NONE    = 0,
+    CUDNN_RNN_CLIP_MINMAX  = 1,
+} cudnnRNNClipMode_t;
+
+typedef enum cudnnWgradMode_t {
+    CUDNN_WGRAD_MODE_ADD = 0,
+    CUDNN_WGRAD_MODE_SET = 1,
+} cudnnWgradMode_t;
+
+// Auxiliary flags for cudnnSetRNNDescriptor_v8.
+#define CUDNN_RNN_PADDED_IO_DISABLED 0u
+#define CUDNN_RNN_PADDED_IO_ENABLED  (1u << 0)
+
+cudnnStatus_t cudnnSetRNNDescriptor_v8(cudnnRNNDescriptor_t rnnDesc,
+                                        cudnnRNNAlgo_t algo,
+                                        cudnnRNNMode_t cellMode,
+                                        cudnnRNNBiasMode_t biasMode,
+                                        cudnnDirectionMode_t dirMode,
+                                        cudnnRNNInputMode_t inputMode,
+                                        cudnnDataType_t dataType,
+                                        cudnnDataType_t mathPrec,
+                                        cudnnMathType_t mathType,
+                                        int32_t inputSize,
+                                        int32_t hiddenSize,
+                                        int32_t projSize,
+                                        int32_t numLayers,
+                                        cudnnDropoutDescriptor_t dropoutDesc,
+                                        uint32_t auxFlags);
+
+cudnnStatus_t cudnnGetRNNDescriptor_v8(cudnnRNNDescriptor_t rnnDesc,
+                                        cudnnRNNAlgo_t* algo,
+                                        cudnnRNNMode_t* cellMode,
+                                        cudnnRNNBiasMode_t* biasMode,
+                                        cudnnDirectionMode_t* dirMode,
+                                        cudnnRNNInputMode_t* inputMode,
+                                        cudnnDataType_t* dataType,
+                                        cudnnDataType_t* mathPrec,
+                                        cudnnMathType_t* mathType,
+                                        int32_t* inputSize,
+                                        int32_t* hiddenSize,
+                                        int32_t* projSize,
+                                        int32_t* numLayers,
+                                        cudnnDropoutDescriptor_t* dropoutDesc,
+                                        uint32_t* auxFlags);
+
+cudnnStatus_t cudnnCreateRNNDataDescriptor(cudnnRNNDataDescriptor_t* rnnDataDesc);
+cudnnStatus_t cudnnDestroyRNNDataDescriptor(cudnnRNNDataDescriptor_t rnnDataDesc);
+
+cudnnStatus_t cudnnSetRNNDataDescriptor(cudnnRNNDataDescriptor_t rnnDataDesc,
+                                         cudnnDataType_t dataType,
+                                         cudnnRNNDataLayout_t layout,
+                                         int maxSeqLength,
+                                         int batchSize,
+                                         int vectorSize,
+                                         const int seqLengthArray[],
+                                         void* paddingFill);
+
+cudnnStatus_t cudnnGetRNNDataDescriptor(cudnnRNNDataDescriptor_t rnnDataDesc,
+                                         cudnnDataType_t* dataType,
+                                         cudnnRNNDataLayout_t* layout,
+                                         int* maxSeqLength,
+                                         int* batchSize,
+                                         int* vectorSize,
+                                         int arrayLengthRequested,
+                                         int seqLengthArray[],
+                                         void* paddingFill);
+
+cudnnStatus_t cudnnGetRNNWeightSpaceSize(cudnnHandle_t handle,
+                                          cudnnRNNDescriptor_t rnnDesc,
+                                          size_t* weightSpaceSize);
+
+cudnnStatus_t cudnnGetRNNTempSpaceSizes(cudnnHandle_t handle,
+                                         cudnnRNNDescriptor_t rnnDesc,
+                                         cudnnForwardMode_t fwdMode,
+                                         cudnnRNNDataDescriptor_t xDesc,
+                                         size_t* workSpaceSize,
+                                         size_t* reserveSpaceSize);
+
+cudnnStatus_t cudnnGetRNNWeightParams(cudnnHandle_t handle,
+                                       cudnnRNNDescriptor_t rnnDesc,
+                                       int32_t pseudoLayer,
+                                       size_t weightSpaceSize,
+                                       const void* weightSpace,
+                                       int32_t linLayerID,
+                                       cudnnTensorDescriptor_t mDesc,
+                                       void** mAddr,
+                                       cudnnTensorDescriptor_t bDesc,
+                                       void** bAddr);
+
+cudnnStatus_t cudnnBuildRNNDynamic(cudnnHandle_t handle,
+                                    cudnnRNNDescriptor_t rnnDesc,
+                                    int miniBatch);
+
+cudnnStatus_t cudnnRNNForward(cudnnHandle_t handle,
+                               cudnnRNNDescriptor_t rnnDesc,
+                               cudnnForwardMode_t fwdMode,
+                               const int32_t devSeqLengths[],
+                               cudnnRNNDataDescriptor_t xDesc, const void* x,
+                               cudnnRNNDataDescriptor_t yDesc, void* y,
+                               cudnnTensorDescriptor_t hDesc,
+                               const void* hx, void* hy,
+                               cudnnTensorDescriptor_t cDesc,
+                               const void* cx, void* cy,
+                               size_t weightSpaceSize, const void* weightSpace,
+                               size_t workSpaceSize, void* workSpace,
+                               size_t reserveSpaceSize, void* reserveSpace);
+
+// v7 weight-layout queries. PyTorch's pre-v8 branch places weights with these,
+// for an ordinary LSTM as much as a projected one.
+cudnnStatus_t cudnnGetRNNLinLayerMatrixParams(cudnnHandle_t handle,
+                                               cudnnRNNDescriptor_t rnnDesc,
+                                               int pseudoLayer,
+                                               cudnnTensorDescriptor_t xDesc,
+                                               cudnnFilterDescriptor_t wDesc,
+                                               const void* w,
+                                               int linLayerID,
+                                               cudnnFilterDescriptor_t linLayerMatDesc,
+                                               void** linLayerMat);
+
+cudnnStatus_t cudnnGetRNNLinLayerBiasParams(cudnnHandle_t handle,
+                                             cudnnRNNDescriptor_t rnnDesc,
+                                             int pseudoLayer,
+                                             cudnnTensorDescriptor_t xDesc,
+                                             cudnnFilterDescriptor_t wDesc,
+                                             const void* w,
+                                             int linLayerID,
+                                             cudnnFilterDescriptor_t linLayerBiasDesc,
+                                             void** linLayerBias);
+
 // ── Multi-head Attention (cuDNN 7.5+) ──────────────────────────────────────────
 
 typedef struct cudnnAttnStruct* cudnnAttnDescriptor_t;
