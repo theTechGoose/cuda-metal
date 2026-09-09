@@ -24,7 +24,21 @@ BUILD_DIR="build-release"
 cmake -S . -B "$BUILD_DIR" >/dev/null
 
 if [ $# -gt 0 ]; then
-    cmake --build "$BUILD_DIR" --target "$@" -j8 2>&1 | grep -E 'error:|warning: unused|Linking|Built target' || true
+    # The build's exit status is load-bearing and used to be discarded. Piping
+    # into grep put grep's status at the end of the pipe, and `|| true` swallowed
+    # even that -- so a target that failed to compile left the PREVIOUS binary in
+    # place and ctest happily ran it. That produced green runs for tests whose
+    # source did not compile, three separate times, which is worse than a red run
+    # because it is reported as evidence. Capture the status, then filter.
+    BUILD_LOG="$(mktemp)"
+    if ! cmake --build "$BUILD_DIR" --target "$@" -j8 > "$BUILD_LOG" 2>&1; then
+        echo "mac_ctest: BUILD FAILED -- not running tests against stale binaries" >&2
+        grep -E 'error:' "$BUILD_LOG" | head -20 >&2
+        rm -f "$BUILD_LOG"
+        exit 1
+    fi
+    grep -E 'warning: unused|Linking|Built target' "$BUILD_LOG" || true
+    rm -f "$BUILD_LOG"
 fi
 
 REPEAT="${CUMETAL_CTEST_REPEAT:-1}"

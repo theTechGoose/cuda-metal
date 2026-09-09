@@ -274,6 +274,74 @@ int main() {
                      "single-timestep calls carrying state\n", mismatches, kSeq);
         return 1;
     }
+    // PyTorch's choice of IO flag is DATA-dependent, not a constant:
+    // aten/src/ATen/cudnn/Descriptors.h passes
+    //   packed ? CUDNN_RNN_PADDED_IO_DISABLED : CUDNN_RNN_PADDED_IO_ENABLED
+    // so the same model sends ENABLED for unpacked input and DISABLED for a
+    // packed batch. A capture only ever shows whichever one that run took.
+    // Hardening around one observation is exactly how the projSize guard went
+    // wrong, so assert BOTH flags and the packed layout, and require the same
+    // numbers from each -- an implementation that ignores these must ignore
+    // them consistently, and one that later honours them must not change the
+    // answer for the uniform-length case where there is no padding.
+    {
+        const struct { const char* what; unsigned flags; cudnnRNNDataLayout_t layout; }
+            variants[3] = {
+                {"PADDED_IO_ENABLED",  CUDNN_RNN_PADDED_IO_ENABLED,
+                 CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_UNPACKED},
+                {"PADDED_IO_DISABLED", CUDNN_RNN_PADDED_IO_DISABLED,
+                 CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_UNPACKED},
+                {"packed layout",      CUDNN_RNN_PADDED_IO_DISABLED,
+                 CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_PACKED},
+            };
+        for (const auto& v : variants) {
+            cudnnRNNDescriptor_t alt = nullptr;
+            cudnnRNNDataDescriptor_t xAlt = nullptr, yAlt = nullptr;
+            std::vector<int> lens(static_cast<std::size_t>(kBatch), kSeq);
+            if (!check(cudnnCreateRNNDescriptor(&alt), "createRNNDescriptor alt") ||
+                !check(cudnnSetRNNDescriptor_v8(
+                           alt, CUDNN_RNN_ALGO_STANDARD, CUDNN_LSTM,
+                           CUDNN_RNN_DOUBLE_BIAS, CUDNN_UNIDIRECTIONAL,
+                           CUDNN_LINEAR_INPUT, CUDNN_DATA_FLOAT, CUDNN_DATA_FLOAT,
+                           CUDNN_DEFAULT_MATH, kInput, kHidden, kHidden, kLayers,
+                           nullptr, v.flags),
+                       v.what) ||
+                !check(cudnnCreateRNNDataDescriptor(&xAlt), "createRNNData xAlt") ||
+                !check(cudnnCreateRNNDataDescriptor(&yAlt), "createRNNData yAlt") ||
+                !check(cudnnSetRNNDataDescriptor(xAlt, CUDNN_DATA_FLOAT, v.layout,
+                                                 kSeq, kBatch, kInput, lens.data(),
+                                                 nullptr), "setRNNData xAlt") ||
+                !check(cudnnSetRNNDataDescriptor(yAlt, CUDNN_DATA_FLOAT, v.layout,
+                                                 kSeq, kBatch, kHidden, lens.data(),
+                                                 nullptr), "setRNNData yAlt")) {
+                return 1;
+            }
+            std::vector<float> y_alt(y_full.size(), 0.0f);
+            std::vector<float> hy_alt(state_elems, 0.0f), cy_alt(state_elems, 0.0f);
+            if (!check(cudnnRNNForward(handle, alt, CUDNN_FWD_MODE_INFERENCE,
+                                       lens.data(), xAlt, x.data(), yAlt, y_alt.data(),
+                                       hDesc, nullptr, hy_alt.data(),
+                                       cDesc, nullptr, cy_alt.data(),
+                                       weight_bytes, weights.data(),
+                                       0, nullptr, 0, nullptr),
+                       "cudnnRNNForward alt")) {
+                return 1;
+            }
+            for (std::size_t i = 0; i < y_full.size(); ++i) {
+                if (y_alt[i] != y_full[i]) {
+                    std::fprintf(stderr,
+                                 "FAIL: %s changed the output at %zu (%.9g vs %.9g); "
+                                 "with uniform lengths there is no padding, so it "
+                                 "must not\n", v.what, i, y_alt[i], y_full[i]);
+                    return 1;
+                }
+            }
+            cudnnDestroyRNNDataDescriptor(xAlt);
+            cudnnDestroyRNNDataDescriptor(yAlt);
+            cudnnDestroyRNNDescriptor(alt);
+        }
+    }
+
     // The scratch size has to scale with batch. It did not: the formula was
     // seq * directions * gates * hidden * 4 with no batch factor, so every
     // batch above 1 was under-reported. Harmless today because nothing writes
@@ -329,9 +397,9 @@ int main() {
                                       nullptr) == CUDNN_STATUS_SUCCESS) {
             const cudnnStatus_t st = cudnnRNNForward(
                 handle, rnn, CUDNN_FWD_MODE_INFERENCE, uneven.data(), ragged, x.data(),
-                yFull, y_full.data(), hDesc, h0.data(), hy_full.data(), cDesc,
-                c0.data(), cy_full.data(), weight_bytes, weights.data(),
-                work_bytes, work.data(), reserve_bytes, reserve.data());
+                yFull, y_full.data(), hDesc, nullptr, hy_full.data(), cDesc,
+                nullptr, cy_full.data(), weight_bytes, weights.data(),
+                0, nullptr, 0, nullptr);
             if (st == CUDNN_STATUS_SUCCESS) {
                 std::fprintf(stderr,
                              "FAIL: sequences of differing length were accepted, but "
