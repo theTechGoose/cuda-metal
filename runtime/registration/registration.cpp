@@ -1198,9 +1198,11 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
             }
             return true;
         }
-        emit_options.textual_include_inputs.push_back(
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
-            "support" / "cumetal_fp64_inline_support.metal");
+        if (const std::filesystem::path support =
+                cumetal::air_emitter::metal_support_file("cumetal_fp64_inline_support.metal");
+            !support.empty()) {
+            emit_options.textual_include_inputs.push_back(support);
+        }
     } else {
         REG_DEBUG("using LLVM IR lowering path for '%s'", kernel_name.c_str());
         maybe_dump_ptx_for_llvm_debug(kernel_name, ptx_source);
@@ -1250,10 +1252,11 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         emit_options.kernel_name = lowered.entry_name.empty() ? kernel_name : lowered.entry_name;
         if (ptx_source.find(".f64") != std::string::npos &&
             cumetal::ptx::fp64_mode_links_vf64_support(lower_options.fp64_mode)) {
-            emit_options.additional_link_inputs.push_back(
-                std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
-                "metal" / "support" / "cumetal_fp64_support.metal"
-            );
+            if (const std::filesystem::path support =
+                    cumetal::air_emitter::metal_support_file("cumetal_fp64_support.metal");
+                !support.empty()) {
+                emit_options.additional_link_inputs.push_back(support);
+            }
         }
     }
     emit_options.input = staged_input;

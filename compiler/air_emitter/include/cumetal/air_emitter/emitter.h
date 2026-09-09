@@ -46,4 +46,25 @@ struct EmitResult {
 
 EmitResult emit_metallib(const EmitOptions& options);
 
+// The directory holding CuMetal's own Metal support sources
+// (cumetal_fp64_support.metal and cumetal_fp64_inline_support.metal), or an
+// empty path when none can be found.
+//
+// These used to be addressed as CUMETAL_SOURCE_DIR/compiler/metal/support --
+// a compile-time path to the machine that BUILT the binary. A release then
+// asked xcrun to compile a file inside a source checkout that exists nowhere
+// but that machine, so the FP64 support link failed for every user who had
+// not built CuMetal themselves from that exact directory. It went unnoticed
+// because on a build machine the path is real. Resolution is at runtime now,
+// from the binary's own location, with the source tree kept only as the
+// last resort that makes an uninstalled build work.
+//
+// CUMETAL_METAL_SUPPORT_DIR overrides it for a relocated or unusual install.
+std::filesystem::path metal_support_dir();
+
+// The support source for a given path: the inline variant is included
+// textually into a .metal translation unit, the other is air-linked. Empty
+// when the support directory cannot be found or the file is not in it.
+std::filesystem::path metal_support_file(const std::string& file_name);
+
 }  // namespace cumetal::air_emitter

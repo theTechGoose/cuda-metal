@@ -1176,9 +1176,17 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     emit.math_mode = g_math_mode;
     emit.fp_contract = g_fp_contract;
     if (metal_text.find("cm_fp64_") != std::string::npos) {
-        emit.textual_include_inputs.push_back(
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
-            "support" / "cumetal_fp64_inline_support.metal");
+        const std::filesystem::path support =
+            cumetal::air_emitter::metal_support_file("cumetal_fp64_inline_support.metal");
+        if (support.empty()) {
+            cleanup();
+            std::cerr << "cumetalc failed: this kernel needs CuMetal's FP64 inline support "
+                         "source, and it is not installed. Expected it beside this binary in "
+                         "<prefix>/libexec/cumetal/metal-support; set "
+                         "CUMETAL_METAL_SUPPORT_DIR to point at it.\n";
+            return 1;
+        }
+        emit.textual_include_inputs.push_back(support);
     }
     const auto emitted = cumetal::air_emitter::emit_metallib(emit);
     if (!emitted.ok) {
@@ -2015,10 +2023,16 @@ int main(int argc, char** argv) {
         const bool typed_msl = options.input.extension() == ".metal";
         auto& support_inputs = typed_msl ? options.textual_include_inputs
                                          : options.additional_link_inputs;
-        support_inputs.push_back(
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
-            "support" / (typed_msl ? "cumetal_fp64_inline_support.metal"
-                                     : "cumetal_fp64_support.metal"));
+        const std::filesystem::path support = cumetal::air_emitter::metal_support_file(
+            typed_msl ? "cumetal_fp64_inline_support.metal" : "cumetal_fp64_support.metal");
+        if (support.empty()) {
+            std::cerr << "cumetalc failed: this kernel needs CuMetal's FP64 support source, "
+                         "and it is not installed. Expected it beside this binary in "
+                         "<prefix>/libexec/cumetal/metal-support; set "
+                         "CUMETAL_METAL_SUPPORT_DIR to point at it.\n";
+            return 1;
+        }
+        support_inputs.push_back(support);
     }
     const auto result = cumetal::air_emitter::emit_metallib(options);
     for (const auto& temp_file : temp_files) {

@@ -122,6 +122,67 @@ if [ -n "$MISSING_HEADERS" ]; then
 fi
 echo "  $(cd runtime/api && command find . -type f | wc -l | tr -d ' ') headers staged"
 
+# A release must be able to compile on a machine that has never seen this
+# checkout. 0.6.1 could not: cumetalc addressed its FP64 support source as
+# CUMETAL_SOURCE_DIR/compiler/metal/support/..., a compile-time path to the
+# BUILD machine, so xcrun was handed a file that exists nowhere else and the
+# FP64 support link failed for every other user. It was invisible here because
+# on this machine the path is real -- which is exactly why it needs a gate
+# rather than care. Two checks: the support sources are in the tree, and no
+# shipped binary carries this checkout's path.
+step "Verify the tree is self-contained"
+for support in cumetal_fp64_support.metal cumetal_fp64_inline_support.metal; do
+    [ -f "$STAGE_DIR/libexec/cumetal/metal-support/compiler/metal/support/$support" ] || {
+        printf 'release: %s is missing from the staged tree\n' "$support" >&2
+        exit 1
+    }
+done
+LEAKED="$(command grep -rl "$REPO_ROOT" "$STAGE_DIR/bin" "$STAGE_DIR/lib" "$STAGE_DIR/libexec" \
+    2>/dev/null || true)"
+if [ -n "$LEAKED" ]; then
+    printf 'release: these shipped files embed this checkout'"'"'s path (%s):\n%s\n' \
+        "$REPO_ROOT" "$LEAKED" >&2
+    printf 'a user without that directory cannot use them.\n' >&2
+    exit 1
+fi
+[ -f "$STAGE_DIR/libexec/cumetal/metal-support/third_party/VF64-metal/Sources/VF64Metal/Shaders/Interop/VF64Support.metal" ] || {
+    printf 'release: the VF64 shaders the support sources include are not staged\n' >&2
+    exit 1
+}
+echo "  support sources staged; no shipped binary references $REPO_ROOT"
+
+# The staged tree has the files and names no local path -- now prove it actually
+# WORKS, by compiling an FP64-touching kernel with the staged cumetalc and
+# confirming the support source it reaches for is the staged one. Presence and
+# absence are both checkable without catching a broken relative include; this
+# caught exactly that (the support sources include VF64-metal's shaders with a
+# path relative to their own directory, so shipping the two files alone was not
+# enough).
+step "Verify the staged compiler is self-sufficient"
+FP64_PROBE_DIR="$(mktemp -d /tmp/cumetal-release-probe-XXXXXX)"
+cat > "$FP64_PROBE_DIR/fp64.cu" <<'PROBE'
+extern "C" __global__ void fp64_touch(double* out, const double* in) {
+    out[threadIdx.x] = in[threadIdx.x] * 0.01 + 1.0;
+}
+PROBE
+if CUMETAL_DEBUG_EMITTER=1 "$STAGE_DIR/bin/cumetalc" --cuda-device \
+        "$FP64_PROBE_DIR/fp64.cu" -o "$FP64_PROBE_DIR/out.metallib" \
+        > "$FP64_PROBE_DIR/log.txt" 2>&1 && [ -f "$FP64_PROBE_DIR/out.metallib" ]; then
+    if command grep -q "$REPO_ROOT/compiler/metal/support" "$FP64_PROBE_DIR/log.txt"; then
+        echo "release: the staged cumetalc reached back into this checkout for its" >&2
+        echo "  FP64 support source; a user without $REPO_ROOT cannot compile." >&2
+        rm -rf "$FP64_PROBE_DIR"
+        exit 1
+    fi
+    echo "  staged cumetalc compiled an FP64 kernel using only the staged tree"
+else
+    echo "release: the staged cumetalc could not compile an FP64-touching kernel:" >&2
+    tail -30 "$FP64_PROBE_DIR/log.txt" >&2
+    rm -rf "$FP64_PROBE_DIR"
+    exit 1
+fi
+rm -rf "$FP64_PROBE_DIR"
+
 # Sign with a Developer ID when the machine has one. Gatekeeper quarantines an
 # unsigned download, and the fix a user reaches for -- disabling Gatekeeper --
 # is worse than the problem. This is detection, not configuration: the day a

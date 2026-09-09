@@ -16,9 +16,86 @@
 #include <string>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <cstdlib>
+#include <dlfcn.h>
 #include <vector>
 
 namespace cumetal::air_emitter {
+
+namespace {
+
+// The file every candidate directory is judged by: if this is not there, the
+// directory is not CuMetal's Metal support directory.
+constexpr const char* kSupportProbe = "cumetal_fp64_support.metal";
+
+bool has_support(const std::filesystem::path& dir) {
+    if (dir.empty()) return false;
+    std::error_code ec;
+    return std::filesystem::exists(dir / kSupportProbe, ec);
+}
+
+// The binary this code is linked into -- the executable for cumetalc, the
+// dylib for the runtime. dladdr answers for both, which argv0 cannot.
+std::filesystem::path containing_binary() {
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void*>(&has_support), &info) == 0 ||
+        info.dli_fname == nullptr) {
+        return {};
+    }
+    std::error_code ec;
+    auto path = std::filesystem::weakly_canonical(std::filesystem::path(info.dli_fname), ec);
+    return ec ? std::filesystem::path(info.dli_fname) : path;
+}
+
+}  // namespace
+
+std::filesystem::path metal_support_dir() {
+    static const std::filesystem::path resolved = []() -> std::filesystem::path {
+        // 1. An explicit override always wins, so a relocated install is recoverable.
+        if (const char* dir = std::getenv("CUMETAL_METAL_SUPPORT_DIR");
+            dir != nullptr && dir[0] != '\0') {
+            const std::filesystem::path candidate(dir);
+            if (has_support(candidate)) return candidate;
+        }
+
+        if (const char* root = std::getenv("CUMETAL_ROOT"); root != nullptr && root[0] != '\0') {
+            const std::filesystem::path candidate =
+                std::filesystem::path(root) / "libexec" / "cumetal" / "metal-support" /
+                "compiler" / "metal" / "support";
+            if (has_support(candidate)) return candidate;
+        }
+
+        // 2. Next to whatever binary we are part of: <prefix>/bin/cumetalc and
+        //    <prefix>/lib/libcumetal.dylib both reach <prefix>/libexec/...
+        const std::filesystem::path self = containing_binary();
+        if (!self.empty()) {
+            const std::filesystem::path dir = self.parent_path();
+            for (const std::filesystem::path& candidate :
+                 {dir.parent_path() / "libexec" / "cumetal" / "metal-support" /
+                      "compiler" / "metal" / "support",
+                  dir / "metal-support" / "compiler" / "metal" / "support"}) {
+                if (has_support(candidate)) return candidate;
+            }
+        }
+
+        // 3. The source tree, so an uninstalled build works. A RELEASE must never
+        //    reach this: the path names the machine that built it.
+        const std::filesystem::path source =
+            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" / "support";
+        if (has_support(source)) return source;
+
+        return {};
+    }();
+    return resolved;
+}
+
+std::filesystem::path metal_support_file(const std::string& file_name) {
+    const std::filesystem::path dir = metal_support_dir();
+    if (dir.empty()) return {};
+    std::error_code ec;
+    const std::filesystem::path candidate = dir / file_name;
+    return std::filesystem::exists(candidate, ec) ? candidate : std::filesystem::path();
+}
 namespace {
 
 constexpr std::size_t kHeaderSize = 40;

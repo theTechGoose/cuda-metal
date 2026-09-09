@@ -453,6 +453,14 @@ target_compile_options(cumetal_air_emitter
         -Wpedantic
 )
 
+# Only the last-resort branch of metal_support_dir() uses this, so that an
+# uninstalled build still finds its own support sources. An installed binary
+# resolves them from its own location instead -- see metal_support_dir().
+target_compile_definitions(cumetal_air_emitter
+    PRIVATE
+        CUMETAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
 add_executable(cumetal-air-emitter
     compiler/air_emitter/src/main.cpp
 )
@@ -742,6 +750,25 @@ if(APPLE)
         ]])
     endif()
 endif()
+
+# CuMetal's own Metal support sources. cumetalc and libcumetal compile these
+# with xcrun at need (the FP64 helpers the legacy path air-links), so a release
+# that omits them has a compiler that cannot finish an FP64-touching kernel on
+# any machine but the one that built it.
+# Laid out as a miniature source tree rather than two loose files: the support
+# sources reach VF64-metal's shaders with a relative include
+# (../../../third_party/VF64-metal/...), and mirroring compiler/ and
+# third_party/ under one root keeps those includes resolving with no edit to
+# the sources themselves.
+install(DIRECTORY compiler/metal/support/
+    DESTINATION libexec/cumetal/metal-support/compiler/metal/support
+    FILES_MATCHING PATTERN "*.metal"
+)
+
+install(DIRECTORY third_party/VF64-metal/Sources/VF64Metal/Shaders/
+    DESTINATION libexec/cumetal/metal-support/third_party/VF64-metal/Sources/VF64Metal/Shaders
+    FILES_MATCHING PATTERN "*.metal"
+)
 
 # The public headers are the whole of runtime/api -- shipped as a tree rather than
 # an enumeration. The enumeration this replaces had drifted: it listed 79 of the

@@ -6,6 +6,37 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A release can compile FP64 kernels on a machine that has never seen this checkout.**
+  `cumetalc` and the runtime addressed CuMetal's own Metal support sources as
+  `CUMETAL_SOURCE_DIR/compiler/metal/support/...` -- a compile-time path to the machine that
+  BUILT the binary. A release therefore handed `xcrun` a file living inside a source checkout
+  that exists nowhere else, and the FP64 support link failed for every user who had not built
+  CuMetal themselves in that exact directory. It was invisible here because on a build machine
+  the path is real. Reported from 0.6.1 by a consumer building PhysX's GPU runtime, whose
+  compiler log showed the release reaching into `/Users/.../cuda-metal/compiler/metal/support/`.
+  The sources are resolved at runtime now, from the binary's own location (`dladdr`, so it works
+  for both `cumetalc` and `libcumetal.dylib`), with the source tree kept only as the last resort
+  that makes an uninstalled build work. `CUMETAL_METAL_SUPPORT_DIR` overrides it.
+- **Releases ship those support sources.** They were not in the tarball at all. They are staged
+  as a miniature source tree under `libexec/cumetal/metal-support/`, because they include
+  VF64-metal's shaders by a path relative to their own directory -- shipping the two files alone
+  produced a *different* failure (`'../../../third_party/VF64-metal/...' file not found`), which
+  is what verifying the fix against a real install prefix caught.
+
+### Added
+
+- **Three release gates against shipping a tree that only works here.** `mac_release_build.sh`
+  now fails the release if the support sources are missing from the stage, if any shipped binary
+  embeds the build checkout's path, or if the staged `cumetalc` cannot compile an FP64-touching
+  kernel using only the staged tree. Presence checks alone would not have caught the relative
+  include, so the last gate compiles a real kernel.
+- **`scripts/mac_ctest.sh`** builds a target and runs a ctest selection on the Mac, so an
+  investigation from a container can get an answer without a full release build.
+  `CUMETAL_CTEST_REPEAT=N` re-runs the selection, which race hunting needs: one clean pass of a
+  concurrency test proves nothing. `CUMETAL_CTEST_ARGS` passes extra ctest flags.
+
 ## [0.6.2] - 2026-09-09
 
 ### Fixed
