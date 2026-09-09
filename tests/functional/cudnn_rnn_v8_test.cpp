@@ -274,6 +274,41 @@ int main() {
                      "single-timestep calls carrying state\n", mismatches, kSeq);
         return 1;
     }
+    // The scratch size has to scale with batch. It did not: the formula was
+    // seq * directions * gates * hidden * 4 with no batch factor, so every
+    // batch above 1 was under-reported. Harmless today because nothing writes
+    // into the workspace -- the engine validates it and computes from its own
+    // storage -- but a scratch formula that ignores a dimension of the problem
+    // is wrong waiting for a use, so assert the scaling rather than the number.
+    {
+        cudnnRNNDataDescriptor_t wide = nullptr;
+        const int wide_batch = kBatch * 4;
+        std::vector<int> wide_lengths(static_cast<std::size_t>(wide_batch), kSeq);
+        size_t narrow_ws = 0, wide_ws = 0, dummy = 0;
+        if (!check(cudnnCreateRNNDataDescriptor(&wide), "createRNNData wide") ||
+            !check(cudnnSetRNNDataDescriptor(wide, CUDNN_DATA_FLOAT,
+                                             CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_UNPACKED,
+                                             kSeq, wide_batch, kInput,
+                                             wide_lengths.data(), nullptr),
+                   "setRNNData wide") ||
+            !check(cudnnGetRNNTempSpaceSizes(handle, rnn, CUDNN_FWD_MODE_INFERENCE,
+                                             xFull, &narrow_ws, &dummy),
+                   "tempSpace narrow") ||
+            !check(cudnnGetRNNTempSpaceSizes(handle, rnn, CUDNN_FWD_MODE_INFERENCE,
+                                             wide, &wide_ws, &dummy),
+                   "tempSpace wide")) {
+            return 1;
+        }
+        cudnnDestroyRNNDataDescriptor(wide);
+        if (wide_ws != narrow_ws * 4) {
+            std::fprintf(stderr,
+                         "FAIL: workspace for batch %d is %zu, for batch %d is %zu; "
+                         "expected it to scale with batch (%zu)\n",
+                         kBatch, narrow_ws, wide_batch, wide_ws, narrow_ws * 4);
+            return 1;
+        }
+    }
+
     // CUDNN_RNN_PADDED_IO_ENABLED is accepted and ignored, which is only
     // defensible because the one case where the flag changes anything --
     // sequences of differing length within a batch, where the padding exists --

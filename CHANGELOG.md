@@ -6,6 +6,20 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **The RNN scratch-size formula accounts for batch.** `rnn_scratch_bytes` computed
+  `seq * directions * gates * hidden * 4` with no `batchSize` factor, so
+  `cudnnGetRNNTempSpaceSizes` and the legacy workspace queries under-reported for every batch
+  above 1. It was not an under-allocation: the engine validates the caller's workspace and then
+  computes from its own storage, so nothing is written into that buffer at any shape. But a
+  scratch formula that ignores a dimension of the problem is wrong waiting for a use, and the
+  moment the forward actually consumed the workspace it would have become an overrun. The test
+  asserts the scaling rather than the constant.
+
+  Found while auditing a divergence a consumer measured against real cuDNN — their conclusion
+  (a heap overrun) did not hold, but looking properly turned up this instead.
+
 ## [0.6.10] - 2026-09-09
 
 ### Fixed

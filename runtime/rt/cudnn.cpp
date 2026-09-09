@@ -343,13 +343,23 @@ bool rnn_parameter_bytes(const cudnnRNNStruct* rnn, int input_size, size_t* byte
     return checked_mul(total, sizeof(float), bytes);
 }
 
-bool rnn_scratch_bytes(const cudnnRNNStruct* rnn, int seq_length, bool reserve,
-                       size_t* bytes) {
-    if (!valid_rnn(rnn) || seq_length <= 0 || !bytes) return false;
+// Scratch geometry for one forward. batch_size is a real factor: the per-
+// timestep gate activations exist once per sequence element, so a formula that
+// omits it under-reports for every batch above 1.
+//
+// Nothing writes into this buffer today -- the engine validates the caller's
+// workspace and then computes from its own storage -- so the omission was not
+// an overrun. It would become one the moment the forward actually uses the
+// workspace, which is exactly the kind of dependency that is invisible until
+// it breaks. Sized correctly now, while it is still cheap to do.
+bool rnn_scratch_bytes(const cudnnRNNStruct* rnn, int seq_length, int batch_size,
+                       bool reserve, size_t* bytes) {
+    if (!valid_rnn(rnn) || seq_length <= 0 || batch_size <= 0 || !bytes) return false;
     const size_t directions = rnn->direction == CUDNN_BIDIRECTIONAL ? 2 : 1;
     const size_t gates = rnn->cellMode == CUDNN_LSTM ? 4 :
                          rnn->cellMode == CUDNN_GRU ? 3 : 1;
     size_t elements = static_cast<size_t>(seq_length);
+    if (!checked_mul(elements, static_cast<size_t>(batch_size), &elements)) return false;
     if (reserve &&
         !checked_mul(elements, static_cast<size_t>(rnn->numLayers), &elements)) {
         return false;
@@ -2697,7 +2707,8 @@ cudnnStatus_t cudnnGetRNNWorkspaceSize(cudnnHandle_t handle, cudnnRNNDescriptor_
     if (!rnnDesc || !sizeInBytes || !xDesc || seqLength <= 0)
         return CUDNN_STATUS_BAD_PARAM;
     if (!valid_rnn(rnnDesc)) return CUDNN_STATUS_NOT_SUPPORTED;
-    if (!rnn_scratch_bytes(rnnDesc, seqLength, false, sizeInBytes)) {
+    if (!xDesc[0] || !rnn_scratch_bytes(rnnDesc, seqLength, xDesc[0]->n, false,
+                                        sizeInBytes)) {
         return CUDNN_STATUS_BAD_PARAM;
     }
     return CUDNN_STATUS_SUCCESS;
@@ -2712,7 +2723,8 @@ cudnnStatus_t cudnnGetRNNTrainingReserveSize(cudnnHandle_t handle,
     if (!rnnDesc || !sizeInBytes || !xDesc || seqLength <= 0)
         return CUDNN_STATUS_BAD_PARAM;
     if (!valid_rnn(rnnDesc)) return CUDNN_STATUS_NOT_SUPPORTED;
-    if (!rnn_scratch_bytes(rnnDesc, seqLength, true, sizeInBytes)) {
+    if (!xDesc[0] || !rnn_scratch_bytes(rnnDesc, seqLength, xDesc[0]->n, true,
+                                        sizeInBytes)) {
         return CUDNN_STATUS_BAD_PARAM;
     }
     return CUDNN_STATUS_SUCCESS;
@@ -2993,7 +3005,9 @@ cudnnStatus_t cudnnRNNForwardInference(cudnnHandle_t handle,
     try {
         if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
         size_t required_workspace = 0;
-        if (!rnn_scratch_bytes(rnnDesc, seqLength, false, &required_workspace) ||
+        if (!xDesc || !xDesc[0] ||
+            !rnn_scratch_bytes(rnnDesc, seqLength, xDesc[0]->n, false,
+                               &required_workspace) ||
             !workspace || workSpaceSizeInBytes < required_workspace ||
             !tracked_bytes_valid(workspace, required_workspace)) {
             return CUDNN_STATUS_BAD_PARAM;
@@ -3026,8 +3040,11 @@ cudnnStatus_t cudnnRNNForwardTraining(cudnnHandle_t handle,
     try {
         if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
         size_t required_workspace = 0, required_reserve = 0;
-        if (!rnn_scratch_bytes(rnnDesc, seqLength, false, &required_workspace) ||
-            !rnn_scratch_bytes(rnnDesc, seqLength, true, &required_reserve) ||
+        if (!xDesc || !xDesc[0] ||
+            !rnn_scratch_bytes(rnnDesc, seqLength, xDesc[0]->n, false,
+                               &required_workspace) ||
+            !rnn_scratch_bytes(rnnDesc, seqLength, xDesc[0]->n, true,
+                               &required_reserve) ||
             !workspace || workSpaceSizeInBytes < required_workspace ||
             !tracked_bytes_valid(workspace, required_workspace) ||
             !reserveSpace || reserveSpaceSizeInBytes < required_reserve ||
@@ -3316,14 +3333,15 @@ cudnnStatus_t cudnnGetRNNTempSpaceSizes(cudnnHandle_t handle,
         return CUDNN_STATUS_BAD_PARAM;
     }
     if (workSpaceSize &&
-        !rnn_scratch_bytes(rnnDesc, xDesc->maxSeqLength, false, workSpaceSize)) {
+        !rnn_scratch_bytes(rnnDesc, xDesc->maxSeqLength, xDesc->batchSize, false,
+                           workSpaceSize)) {
         return CUDNN_STATUS_BAD_PARAM;
     }
     if (reserveSpaceSize) {
         if (fwdMode == CUDNN_FWD_MODE_INFERENCE) {
             *reserveSpaceSize = 0;
-        } else if (!rnn_scratch_bytes(rnnDesc, xDesc->maxSeqLength, true,
-                                      reserveSpaceSize)) {
+        } else if (!rnn_scratch_bytes(rnnDesc, xDesc->maxSeqLength, xDesc->batchSize,
+                                      true, reserveSpaceSize)) {
             return CUDNN_STATUS_BAD_PARAM;
         }
     }

@@ -132,6 +132,15 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   model — a Conformer encoder, for instance — needs this API or hand-written
   kernels that bypass cuDNN.
 
+  `cudnnGetRNNTempSpaceSizes` reports a far smaller workspace than real cuDNN —
+  51200 bytes against 26470688 for the same 640/640/2 shape at seq 5, batch 2,
+  measured on cuDNN 9.20. That is not an under-allocation bug here: the engine
+  validates the caller's workspace and then computes from its own storage, so
+  nothing is written into that buffer at any shape. It does mean the number is a
+  validation threshold rather than a requirement, and it is a real divergence —
+  a caller must query the library it is about to call, never carry the number
+  across implementations.
+
   Execution is still CPU-backed: the v8 forward computes correct numbers but
   does not run on the GPU. Its timestep/state geometry, parameter sizes, scratch
   sizes, and tracked allocation spans are checked, but backward RNN, packed or
