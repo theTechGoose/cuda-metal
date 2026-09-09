@@ -10,7 +10,9 @@ and [known gaps](docs/known-gaps.md) for the remaining limits.
 
 ## Install
 
-Requires Apple Silicon and macOS 14 or newer. See the
+Requires Apple Silicon and macOS 14 or newer, and runs on the macOS host: a
+Linux container on a Mac (Docker Desktop, OrbStack, Colima) is a VM with no
+Metal passthrough and cannot reach the GPU, whatever the image. See the
 [installation guide](docs/build.md) for compiler and Apple toolchain requirements.
 
 ```bash

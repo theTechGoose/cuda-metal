@@ -5,6 +5,13 @@
 These are durable boundaries unless the canonical specification changes.
 
 - macOS 14+ on Apple Silicon only.
+- No Linux container on a Mac. Docker Desktop, OrbStack, Colima and the like run
+  a Linux VM, and that VM has no Metal passthrough -- there is no device to pass
+  through and no Linux Metal driver to use it. So a Linux container cannot reach
+  CuMetal even when the container runs on Apple Silicon, and no image, flag or
+  runtime changes that. CuMetal runs on the macOS host, natively. A project that
+  needs one identical container everywhere should plan on CPU (or a remote CUDA
+  host) for the Mac leg rather than expecting the container to find the GPU.
 - No Windows, Linux ARM, non-Apple discrete GPU, or Thunderbolt eGPU target.
 - One Apple GPU device; no multi-GPU or peer-to-peer execution.
 - No OpenGL, Vulkan, or DirectX interop.
