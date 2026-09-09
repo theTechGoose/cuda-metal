@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -85,6 +86,45 @@ int main() {
                        "cudnnGetRNNWeightParams")) {
                 return 1;
             }
+            // The rank a framework reads back has to be the rank cuDNN reports:
+            // these are 3-D descriptors, and a getter that answers 4 regardless
+            // of what was set hands out a shape the caller's parameters do not
+            // have. Assert the rank and the dims, not just that the slice fits.
+            // Only layer 0 consumes the network input; a stacked unidirectional
+            // layer takes the layer below's hidden state.
+            const int layer_in = (layer == 0) ? kInput : kHidden;
+            const int expect_cols = (id < 4) ? layer_in : kHidden;
+            const int expect_m[3] = {1, kHidden, expect_cols};
+            const int expect_b[3] = {1, kHidden, 1};
+            const struct { cudnnTensorDescriptor_t d; const int* want; const char* what; }
+                probes[2] = {{mDesc, expect_m, "matrix"}, {bDesc, expect_b, "bias"}};
+            for (const auto& probe : probes) {
+                cudnnDataType_t dt = CUDNN_DATA_FLOAT;
+                int rank = 0;
+                int dims[4] = {0, 0, 0, 0};
+                int strides[4] = {0, 0, 0, 0};
+                if (!check(cudnnGetTensorNdDescriptor(probe.d, 4, &dt, &rank, dims,
+                                                      strides),
+                           "cudnnGetTensorNdDescriptor")) {
+                    return 1;
+                }
+                if (rank != 3) {
+                    std::fprintf(stderr,
+                                 "FAIL: layer %d id %d %s descriptor reports rank %d, "
+                                 "expected 3\n", layer, id, probe.what, rank);
+                    return 1;
+                }
+                for (int d = 0; d < 3; ++d) {
+                    if (dims[d] != probe.want[d]) {
+                        std::fprintf(stderr,
+                                     "FAIL: layer %d id %d %s dims[%d] = %d, expected "
+                                     "%d\n", layer, id, probe.what, d, dims[d],
+                                     probe.want[d]);
+                        return 1;
+                    }
+                }
+            }
+
             const float* base = weights.data();
             const float* m = static_cast<const float*>(mAddr);
             const float* b = static_cast<const float*>(bAddr);

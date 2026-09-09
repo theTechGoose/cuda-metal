@@ -26,6 +26,11 @@ struct cudnnTensorStruct {
     cudnnTensorFormat_t format = CUDNN_TENSOR_NCHW;
     int n = 0, c = 0, h = 0, w = 0;
     int nStride = 0, cStride = 0, hStride = 0, wStride = 0;
+    // The rank the descriptor was SET with. Storage is fixed 4-D, but a caller
+    // that set 3 dimensions must read 3 back: cudnnGetRNNWeightParams hands out
+    // 3-D descriptors, and a framework reading rank 4 from them sees a shape its
+    // own parameters do not have.
+    int nbDims = 4;
 };
 
 struct cudnnFilterStruct {
@@ -513,6 +518,7 @@ cudnnStatus_t cudnnSetTensor4dDescriptor(cudnnTensorDescriptor_t tensorDesc,
         return CUDNN_STATUS_BAD_PARAM;
     tensorDesc->format = format;
     tensorDesc->dataType = dataType;
+    tensorDesc->nbDims = 4;
     tensorDesc->n = n; tensorDesc->c = c; tensorDesc->h = h; tensorDesc->w = w;
     compute_strides(tensorDesc);
     return CUDNN_STATUS_SUCCESS;
@@ -2019,6 +2025,7 @@ cudnnStatus_t cudnnSetTensorNdDescriptor(cudnnTensorDescriptor_t tensorDesc,
 
     tensorDesc->dataType = dataType;
     // Map Nd dims to our 4d representation (pad leading dims with 1)
+    tensorDesc->nbDims = nbDims;
     tensorDesc->n = nbDims >= 1 ? dimA[0] : 1;
     tensorDesc->c = nbDims >= 2 ? dimA[1] : 1;
     tensorDesc->h = nbDims >= 3 ? dimA[2] : 1;
@@ -2038,7 +2045,7 @@ cudnnStatus_t cudnnGetTensorNdDescriptor(cudnnTensorDescriptor_t tensorDesc,
                                           int strideA[]) {
     if (!tensorDesc) return CUDNN_STATUS_BAD_PARAM;
     if (dataType) *dataType = tensorDesc->dataType;
-    if (nbDims) *nbDims = 4;
+    if (nbDims) *nbDims = tensorDesc->nbDims;
     if (dimA && nbDimsRequested >= 1) dimA[0] = tensorDesc->n;
     if (dimA && nbDimsRequested >= 2) dimA[1] = tensorDesc->c;
     if (dimA && nbDimsRequested >= 3) dimA[2] = tensorDesc->h;
