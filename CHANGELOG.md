@@ -6,6 +6,30 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cudnn.h` declares `CUDNN_VERSION`, `CUDNN_MAJOR`, `CUDNN_MINOR` and `CUDNN_PATCHLEVEL`.**
+  The runtime has always answered `cudnnGetVersion()` with 8907, but the header declared no
+  version macro at all, while `cuda.h` and `cuda_runtime.h` declared theirs. Consumers branch on
+  the macro at *compile* time, and an undefined macro is `0` in a preprocessor comparison — so
+  `#if CUDNN_VERSION >= 8000` silently took the pre-v8 path with no diagnostic, in a runtime
+  whose whole recent work is the v8 API. PyTorch's own `aten/src/ATen/cudnn/cudnn-wrapper.h`,
+  included by every ATen cuDNN file, does
+  `#if CUDNN_MAJOR < 8 || (CUDNN_MAJOR == 8 && CUDNN_MINOR < 5)` and would have reported
+  "CuDNN v0 found, but need at least CuDNN v8 ... or disable CuDNN with USE_CUDNN=0".
+
+  The macros are keyed to the same 8907 the runtime returns, and a test asserts the two agree —
+  a version check that disagrees with itself is worse than no version at all. This declares
+  which cuDNN API generation CuMetal implements; it is not a claim to be NVIDIA's 8.9.7 binary.
+
+- **Every RNN configuration that would require `nbDims = 0` reporting stays refused.** cuDNN
+  documents that `cudnnGetRNNWeightParams` reports zero dimensions when a weight matrix or bias
+  does not exist — the first layer's input GEMMs under `CUDNN_SKIP_INPUT`, and absent biases
+  under the non-double bias modes. CuMetal does not implement that reporting; what keeps it
+  honest is that `cudnnSetRNNDescriptor_v8` refuses those configurations outright, making the
+  case unreachable rather than wrong. That coupling between two functions had nothing recording
+  it, so it is now asserted.
+
 ## [0.6.8] - 2026-09-09
 
 ### Fixed
