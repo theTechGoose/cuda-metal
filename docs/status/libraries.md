@@ -83,7 +83,10 @@ full NVIDIA library implementations.
   parameter/workspace/reserve geometry, and rejects short tracked input,
   weight, output, state, or scratch allocations before CPU access. Only
   zero-dropout, standard-algorithm FP32 linear-input RNN/GRU/LSTM modes are
-  accepted. The bounded attention forward path accepts projection-free,
+  accepted, through the legacy v6/v7 entry points; the v8 RNN API and the
+  weight-layout queries a framework needs are absent, so a PyTorch LSTM does not
+  reach this path at all. See [the library gaps](../known-gaps/libraries.md)
+  before reading the acceptance list above as availability. The bounded attention forward path accepts projection-free,
   dropout-free FP32 canonical time/batch/beam/vector descriptors; it validates
   configured maxima, checked tensor spans, non-overlapping output, and rejects
   residuals, windows, incremental mode, variable lengths, and scratch buffers
