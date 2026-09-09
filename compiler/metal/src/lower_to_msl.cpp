@@ -3005,9 +3005,24 @@ struct AstLowerer {
                         five_bits, uint_type);
                     const MslExpr minimum_lane = MslExpression::binary(
                         "&", lane, segment_mask, uint_type);
+                    // PTX: maxLane = (lane & segmask) | (cval & ~segmask). The
+                    // clamp has to be masked by ~segmask, or the bound sits above
+                    // the lane's own segment: the validity predicate then passes
+                    // when it should have clamped, and the lane reads a
+                    // NEIGHBOURING segment's value. At width 32 segmask is 0 and
+                    // the two forms agree, which is why every full-warp shuffle
+                    // was right and only sub-warp widths were wrong -- PhysX's
+                    // GJK/EPA narrowphase shuffles within sub-warp groups, and a
+                    // lane reading the next group's vertex reported hulls metres
+                    // apart as metres deep. See
+                    // tests/cuda_projects/subwarp_shuffle_width.
                     const MslExpr maximum_lane = MslExpression::binary(
                         "|", minimum_lane,
-                        MslExpression::binary("&", control, five_bits, uint_type),
+                        MslExpression::binary(
+                            "&",
+                            MslExpression::binary("&", control, five_bits, uint_type),
+                            MslExpression::unary("~", segment_mask, uint_type),
+                            uint_type),
                         uint_type);
                     MslExpr requested_lane;
                     MslExpr valid_lane;

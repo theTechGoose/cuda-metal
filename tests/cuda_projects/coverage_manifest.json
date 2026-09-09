@@ -170,6 +170,13 @@
       "harness": "standard"
     },
     {
+      "name": "subwarp_shuffle_width",
+      "subdir": "subwarp_shuffle_width",
+      "source": "subwarp_shuffle_width.cu",
+      "binary": "subwarp_shuffle_width",
+      "harness": "standard"
+    },
+    {
       "name": "raytracer",
       "subdir": "raytracer",
       "source": "rtiow.cu",

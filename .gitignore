@@ -33,3 +33,7 @@ a.out
 # Matmul demo binaries and measurement logs
 demos/matmul/out/
 /dist/
+
+# The sandbox rm(1) relocates files here instead of unlinking them; a git add -A
+# then swept them into two commits. Never track them.
+.Trash-*/

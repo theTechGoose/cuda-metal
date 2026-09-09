@@ -350,6 +350,36 @@ cumetal_add_cuda_project_test(
     partial_lane_shuffle_guard partial_lane_shuffle_guard.cu partial_lane_shuffle_guard
 )
 
+# A shuffle narrower than the warp confines each lane to its own segment. The
+# typed backend's bounds check dropped the segment mask from PTX's maxLane, so
+# the predicate passed when it should not and a lane read the next segment's
+# data -- invisible at width 32, where the two forms agree, and every other
+# shuffle test in this suite is width 32.
+cumetal_add_cuda_project_test(
+    functional_cuda_projects_subwarp_shuffle_width
+    subwarp_shuffle_width subwarp_shuffle_width.cu subwarp_shuffle_width
+)
+
+# The same kernel on the typed backend, which is the one PhysX's build selects
+# for convexConvexNphase_stage2Kernel (--backend=cumetal-ir).
+add_test(
+    NAME functional_cuda_projects_subwarp_shuffle_width_typed
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        subwarp_shuffle_width
+        subwarp_shuffle_width.cu
+        subwarp_shuffle_width_typed
+        cumetal-ir
+)
+set_tests_properties(
+    functional_cuda_projects_subwarp_shuffle_width_typed
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
+
 cumetal_add_cuda_project_test(
     functional_cuda_projects_sgemm_naive
     sgemm sgemm_naive.cu sgemm_naive

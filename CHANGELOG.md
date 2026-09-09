@@ -6,6 +6,25 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sub-warp shuffles no longer read outside their segment on the typed backend.** A CUDA
+  shuffle narrower than the warp confines each lane to its own segment of that width. PTX
+  encodes the bound as `maxLane = (lane & segmask) | (cval & ~segmask)`; the typed
+  (`cumetal-ir`) MSL backend emitted `maxLane = (lane & segmask) | cval`, dropping the segment
+  mask. The bound then sat above the lane's own segment, the validity predicate passed where it
+  should have clamped, and the lane read a **neighbouring segment's value** -- affecting
+  `__shfl_sync`, `__shfl_down_sync` and `__shfl_xor_sync` at every width below 32
+  (`__shfl_up_sync` clamps on `minLane` and was correct). At width 32 `segmask` is 0 and the two
+  forms agree, which is why it never showed: the suite's only shuffle test used a full-warp
+  `__shfl_sync`. The legacy backend computes the segment arithmetically and was always right.
+  Found from a PhysX consumer's report that `convexConvexNphase_stage2Kernel` reported two
+  convex hulls 0.69 m apart as metres deep, on the typed backend only, with a contact normal
+  that was not even a separating axis -- the signature of a lane reading another lane's vertex.
+  `tests/cuda_projects/subwarp_shuffle_width` covers all four modes at widths 2/4/8/16/32 on
+  both backends, computing its expectations from the CUDA definition rather than from what the
+  backend happens to produce.
+
 ## [0.6.3] - 2026-09-09
 
 ### Fixed

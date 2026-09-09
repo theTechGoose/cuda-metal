@@ -34,6 +34,7 @@ tests/cuda_projects/local_const_tables/local_const_tables.cu fail pass pass pass
 tests/cuda_projects/nan_semantics/nan_semantics.cu fail pass pass pass
 tests/cuda_projects/nested_aggregate_device_calls/nested_aggregate_device_calls.cu fail pass fail pass
 tests/cuda_projects/partial_lane_shuffle_guard/partial_lane_shuffle_guard.cu fail pass pass pass
+tests/cuda_projects/subwarp_shuffle_width/subwarp_shuffle_width.cu fail pass pass pass
 tests/cuda_projects/raytracer/rtiow.cu fail pass pass pass
 tests/cuda_projects/reduction/reduction_standalone.cu fail pass pass pass
 tests/cuda_projects/ref_return/ref_return.cu fail pass pass fail
