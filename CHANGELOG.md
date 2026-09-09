@@ -6,6 +6,8 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.6.10] - 2026-09-09
+
 ### Fixed
 
 - **`cudnnSetRNNDescriptor_v8` no longer refuses every PyTorch LSTM.** `projSize` is not a
