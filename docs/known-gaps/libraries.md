@@ -83,7 +83,11 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   `cudnnBuildRNNDynamic` are not declared. Recurrent projection (LSTMP,
   PyTorch's `proj_size != 0`) is unsupported at every generation: v7's
   `cudnnSetRNNProjectionLayers` is absent and the v6 descriptor has no
-  projection field. Practical consequence worth stating, because it is not
+  projection field. The weight-layout queries are absent too --
+  `cudnnGetRNNLinLayerMatrixParams` and `cudnnGetRNNLinLayerBiasParams` (v7)
+  alongside `cudnnGetRNNWeightParams` (v8) -- and a framework uses those to
+  place weights for ANY RNN, not only a projected one, so the gap is wider than
+  projection. Practical consequence worth stating, because it is not
   deducible from the list above: `torch.nn.LSTM` on CUDA with a modern cuDNN
   drives the v8 API, so a PyTorch LSTM does not reach this surface at all
   today. Its timestep/state geometry, parameter sizes, scratch
