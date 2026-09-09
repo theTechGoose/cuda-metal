@@ -6,6 +6,24 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The cuDNN v8 LSTM is now checked against PyTorch's numbers, not only against itself.**
+  Every previous RNN test compared CuMetal to CuMetal, which is exactly the shape of test a
+  wrong gate order survives: both sides are wrong the same way and agree. The new test consumes
+  a fixture written by a real `torch.nn.LSTM` on CPU — the module's own parameters, its input,
+  and the output it produced — places those parameters into the weight space *through*
+  `cudnnGetRNNWeightParams`, and requires the forward to reproduce torch's `y`, `hy` and `cy`.
+  Agreement is 4.5e-08 at the committed toy shape and 1.4e-05 at Parakeet's 640/640/2
+  prediction-network shape, which is FP32 accumulation order, not a layout difference. Swapping
+  any two gates in the placement moves the output by 0.35 to 1.08, four orders of magnitude
+  above the tolerance, so the check is sharp. `scripts/gen_lstm_reference.py` regenerates the
+  fixture; `CUMETAL_LSTM_REF` points the same binary at a larger one.
+
+  This settles the gate-order half of the layout claim — i,f,g,o is PyTorch's chunk order and
+  CuMetal reads it that way. It does not settle whether real cuDNN's weight space is the same
+  size, which only a run on NVIDIA hardware answers.
+
 ## [0.6.7] - 2026-09-09
 
 ### Fixed
