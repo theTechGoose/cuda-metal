@@ -88,9 +88,13 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   alongside `cudnnGetRNNWeightParams` (v8) -- and a framework uses those to
   place weights for ANY RNN, not only a projected one, so the gap is wider than
   projection. Practical consequence worth stating, because it is not
-  deducible from the list above: `torch.nn.LSTM` on CUDA with a modern cuDNN
-  drives the v8 API, so a PyTorch LSTM does not reach this surface at all
-  today. Its timestep/state geometry, parameter sizes, scratch
+  deducible from the list above: `torch.nn.LSTM` on CUDA reaches none of this.
+  PyTorch's `aten/src/ATen/native/cudnn/RNN.cpp` carries both generations behind
+  the compile-time `USE_CUDNN_RNN_V8_API` macro -- v8 when defined, which modern
+  cuDNN builds do, and the v7 calls otherwise -- and BOTH branches fail here,
+  the v8 one on absent entry points and the v7 one on the absent weight-layout
+  queries. That second half applies to an ordinary `proj_size = 0` LSTM as much
+  as a projected one. Its timestep/state geometry, parameter sizes, scratch
   sizes, and tracked allocation spans are checked, but backward RNN, packed or
   variable sequences, nonzero dropout, persistent algorithms, and broader
   descriptor formats are absent. Attention forward is limited to
