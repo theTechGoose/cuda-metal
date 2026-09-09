@@ -30,5 +30,7 @@ fi
 REPEAT="${CUMETAL_CTEST_REPEAT:-1}"
 for attempt in $(seq 1 "$REPEAT"); do
     [ "$REPEAT" -gt 1 ] && printf '\n----- attempt %d/%d -----\n' "$attempt" "$REPEAT"
-    ctest --test-dir "$BUILD_DIR" -R "$SELECTION" --output-on-failure || exit $?
+    # CUMETAL_CTEST_ARGS passes extra ctest flags (label filters, timeouts).
+    # shellcheck disable=SC2086
+    ctest --test-dir "$BUILD_DIR" -R "$SELECTION" ${CUMETAL_CTEST_ARGS:-} --output-on-failure || exit $?
 done
