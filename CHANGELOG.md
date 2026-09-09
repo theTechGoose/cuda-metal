@@ -27,11 +27,14 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Added
 
-- **Three release gates against shipping a tree that only works here.** `mac_release_build.sh`
-  now fails the release if the support sources are missing from the stage, if any shipped binary
-  embeds the build checkout's path, or if the staged `cumetalc` cannot compile an FP64-touching
-  kernel using only the staged tree. Presence checks alone would not have caught the relative
-  include, so the last gate compiles a real kernel.
+- **Release gates against shipping a tree that only works here.** `mac_release_build.sh` fails
+  the release if the support sources (or the VF64 shaders they include) are missing from the
+  stage, or if the staged `cumetalc` cannot compile an FP64-touching kernel while reaching only
+  the staged tree for its support source. A presence check alone would not have caught the
+  relative include, so the last gate compiles a real kernel. It does not yet assert that shipped
+  binaries cannot reach the build checkout at all: the build tree finds its own headers through
+  `CUMETAL_SOURCE_DIR` and the release build is also the test build, so compiling that fallback
+  out fails the suite. Making the build tree self-describing is the follow-up.
 - **`scripts/mac_ctest.sh`** builds a target and runs a ctest selection on the Mac, so an
   investigation from a container can get an answer without a full release build.
   `CUMETAL_CTEST_REPEAT=N` re-runs the selection, which race hunting needs: one clean pass of a
