@@ -6,6 +6,8 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-09-09
+
 ### Fixed
 
 - **Every nonzero `projSize` is refused by `cudnnSetRNNDescriptor_v8`, including
