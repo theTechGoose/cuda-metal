@@ -6,6 +6,8 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-09-09
+
 ### Changed
 
 - **The Phase 5 performance gate tells the truth about saxpy instead of flipping a coin.**
