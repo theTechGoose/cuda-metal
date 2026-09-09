@@ -6,6 +6,8 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-09-09
+
 ### Fixed
 
 - **Sub-warp shuffles no longer read outside their segment on the typed backend.** A CUDA
