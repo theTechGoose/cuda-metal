@@ -111,6 +111,27 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   accepting one would leave the weight query describing a matrix that is not
   there.
 
+  `CUDNN_RNN_PADDED_IO_ENABLED` is accepted and ignored. That is only sound
+  because the case where the flag changes the layout — sequences of differing
+  length inside one batch — is refused outright, and the pairing is asserted.
+  A real consumer does set the flag: a `CUDNN_LOGLEVEL_DBG` capture of PyTorch
+  running Parakeet on an RTX 4090 shows `auxFlags = CUDNN_RNN_PADDED_IO_ENABLED`
+  on the descriptor.
+
+  **The cuDNN backend graph API is absent entirely** — `cudnnBackendCreateDescriptor`,
+  `cudnnBackendSetAttribute`, `cudnnBackendFinalize`, `cudnnBackendExecute` are
+  not declared and not implemented. This is the largest single gap in the cuDNN
+  surface, and it is invisible if you audit the legacy per-op entry points,
+  because those exist. The same capture shows PyTorch calling the legacy
+  functions **zero** times — `cudnnConvolutionForward` 0, `cudnnSoftmaxForward` 0,
+  `cudnnNormalizationForwardInference` 0 — against `cudnnBackendSetAttribute` 636,
+  `cudnnBackendFinalize` 183, `cudnnBackendExecute` 102 in sixty seconds of audio.
+  Modern PyTorch routes everything except the RNN through the graph API. The RNN
+  is the exception that still uses classic entry points, which is the only reason
+  the LSTM path above is reachable at all. Any convolution- or normalization-heavy
+  model — a Conformer encoder, for instance — needs this API or hand-written
+  kernels that bypass cuDNN.
+
   Execution is still CPU-backed: the v8 forward computes correct numbers but
   does not run on the GPU. Its timestep/state geometry, parameter sizes, scratch
   sizes, and tracked allocation spans are checked, but backward RNN, packed or

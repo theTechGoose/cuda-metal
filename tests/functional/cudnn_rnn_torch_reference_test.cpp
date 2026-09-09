@@ -124,7 +124,14 @@ int main() {
                                         CUDNN_RNN_DOUBLE_BIAS, CUDNN_UNIDIRECTIONAL,
                                         CUDNN_LINEAR_INPUT, CUDNN_DATA_FLOAT,
                                         CUDNN_DATA_FLOAT, CUDNN_DEFAULT_MATH,
-                                        kInput, kHidden, /*projSize=*/kHidden, kLayers, nullptr, 0),
+                                        kInput, kHidden, /*projSize=*/kHidden, kLayers, nullptr,
+                                        // The flag a real consumer sends. A cuDNN
+                                        // log capture of PyTorch running Parakeet
+                                        // shows CUDNN_RNN_PADDED_IO_ENABLED on the
+                                        // descriptor; both this project's tests and
+                                        // the consumer's used DISABLED, so nothing
+                                        // had ever checked the setting torch uses.
+                                        CUDNN_RNN_PADDED_IO_ENABLED),
                "cudnnSetRNNDescriptor_v8")) {
         return 1;
     }

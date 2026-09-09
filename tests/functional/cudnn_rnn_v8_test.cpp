@@ -274,6 +274,40 @@ int main() {
                      "single-timestep calls carrying state\n", mismatches, kSeq);
         return 1;
     }
+    // CUDNN_RNN_PADDED_IO_ENABLED is accepted and ignored, which is only
+    // defensible because the one case where the flag changes anything --
+    // sequences of differing length within a batch, where the padding exists --
+    // is refused outright. A cuDNN log capture of PyTorch running Parakeet shows
+    // torch sets this flag, so "accepted and ignored" here has to stay paired
+    // with that refusal; if variable lengths were ever accepted without honouring
+    // padded IO, the forward would read the padding as data.
+    {
+        cudnnRNNDataDescriptor_t ragged = nullptr;
+        std::vector<int> uneven(static_cast<std::size_t>(kBatch), kSeq);
+        uneven[0] = kSeq - 1;
+        if (!check(cudnnCreateRNNDataDescriptor(&ragged), "createRNNData ragged")) {
+            return 1;
+        }
+        if (cudnnSetRNNDataDescriptor(ragged, CUDNN_DATA_FLOAT,
+                                      CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_UNPACKED,
+                                      kSeq, kBatch, kInput, uneven.data(),
+                                      nullptr) == CUDNN_STATUS_SUCCESS) {
+            const cudnnStatus_t st = cudnnRNNForward(
+                handle, rnn, CUDNN_FWD_MODE_INFERENCE, uneven.data(), ragged, x.data(),
+                yFull, y_full.data(), hDesc, h0.data(), hy_full.data(), cDesc,
+                c0.data(), cy_full.data(), weight_bytes, weights.data(),
+                work_bytes, work.data(), reserve_bytes, reserve.data());
+            if (st == CUDNN_STATUS_SUCCESS) {
+                std::fprintf(stderr,
+                             "FAIL: sequences of differing length were accepted, but "
+                             "padded IO is ignored -- the forward would read padding "
+                             "as data\n");
+                return 1;
+            }
+        }
+        cudnnDestroyRNNDataDescriptor(ragged);
+    }
+
     // projSize is not a boolean. cuDNN: "It is legal to set projSize equal to
     // hiddenSize, however, in this case, the recurrent projection feature is
     // disabled." So the legal range is 1..hiddenSize, DISABLED is encoded as
