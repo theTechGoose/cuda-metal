@@ -118,6 +118,18 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   running Parakeet on an RTX 4090 shows `auxFlags = CUDNN_RNN_PADDED_IO_ENABLED`
   on the descriptor.
 
+  Worth knowing before sizing any cuDNN work: **cuDNN is an optimization path
+  for at least some real models, not a requirement.** Measured on an RTX 4090
+  with NVIDIA Parakeet (conv subsampling, batch norm, a Conformer encoder and an
+  RNNT prediction network): `torch.backends.cudnn.enabled = False` produced
+  bit-identical transcript output to the cuDNN-enabled run — same
+  `text_sha256` — and ran slightly faster, 0.44s against 0.58s. A
+  `CUDNN_LOGLEVEL_DBG=3` re-run emitted no cuDNN log at all, confirming the
+  library was never entered rather than quietly re-enabled. PyTorch's own CUDA
+  kernels covered the whole model. So a gap in this surface does not necessarily
+  block a model that appears to need it; check whether the dependency is
+  optional before treating it as a blocker.
+
   **The cuDNN backend graph API is absent entirely** — `cudnnBackendCreateDescriptor`,
   `cudnnBackendSetAttribute`, `cudnnBackendFinalize`, `cudnnBackendExecute` are
   not declared and not implemented. This is the largest single gap in the cuDNN
